@@ -1,0 +1,79 @@
+# ============================================================
+# Predictive IDS - ELK Stack + MongoDB
+# Run with: docker-compose up -d
+# Kibana:        http://localhost:5601
+# Elasticsearch: http://localhost:9200
+# MongoDB:       localhost:27017
+# ============================================================
+
+version: '3.8'
+
+services:
+
+  # ── Elasticsearch ────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: ids-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false       # Disabled for dev; enable in production
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m    # Tune for your VM RAM
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - ids-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ── Logstash ─────────────────────────────────────────────
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.0
+    container_name: ids-logstash
+    ports:
+      - "5044:5044"    # Beats input
+      - "9600:9600"    # Logstash monitoring API
+    volumes:
+      - ./config/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    networks:
+      - ids-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # ── Kibana ───────────────────────────────────────────────
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: ids-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    networks:
+      - ids-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # ── MongoDB ──────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: ids-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - ids-network
+
+volumes:
+  es_data:
+  mongo_data:
+
+networks:
+  ids-network:
+    driver: bridge

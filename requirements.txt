@@ -1,0 +1,35 @@
+# ============================================================
+# Predictive IDS - Python Dependencies
+# Install with: pip install -r requirements.txt
+# ============================================================
+
+# Core data science
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.4.2
+imbalanced-learn==0.12.2       # SMOTE for class imbalance
+
+# Deep learning (CNN model)
+tensorflow==2.16.1
+keras==3.3.3
+
+# ELK / Elasticsearch client
+elasticsearch==8.13.0
+
+# Database
+pymongo==4.7.2
+
+# API backend
+fastapi==0.111.0
+uvicorn==0.29.0
+python-multipart==0.0.9
+
+# Utilities
+python-dotenv==1.0.1           # Load .env config
+joblib==1.4.2                  # Save/load scalers
+matplotlib==3.9.0              # Evaluation plots
+seaborn==0.13.2                # Confusion matrix heatmaps
+tqdm==4.66.4                   # Progress bars
+schedule==1.2.2                # Inference loop scheduling
+requests==2.32.2
+pyyaml==6.0.1

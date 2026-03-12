@@ -1,0 +1,69 @@
+# ============================================================
+# Filebeat Configuration
+# Install on BOTH Ubuntu VMs (main and attacker)
+# Ships logs to Logstash on the main VM
+# ============================================================
+
+filebeat.inputs:
+
+  # System logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/syslog
+      - /var/log/messages
+    fields:
+      log_type: syslog
+    fields_under_root: true
+
+  # Authentication logs (SSH brute force, login failures)
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/auth.log
+      - /var/log/secure
+    fields:
+      log_type: auth
+    fields_under_root: true
+
+  # Kernel / dmesg
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/kern.log
+    fields:
+      log_type: kernel
+    fields_under_root: true
+
+  # Application logs (if running a mock financial app)
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/ids-app/*.log
+    fields:
+      log_type: application
+    fields_under_root: true
+    ignore_older: 24h
+
+# ── Processors ──────────────────────────────────────────────
+processors:
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
+  - add_cloud_metadata: ~
+  - add_docker_metadata: ~
+
+# ── Output: send to Logstash ────────────────────────────────
+output.logstash:
+  # Replace with your main VM's IP address
+  hosts: ["localhost:5044"]
+  # If Logstash is on another VM, use that VM's IP:
+  # hosts: ["192.168.64.X:5044"]
+
+# ── Logging ─────────────────────────────────────────────────
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat
+  keepfiles: 7
+  permissions: 0644
