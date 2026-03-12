@@ -23,14 +23,29 @@ sudo apt update -y && sudo apt upgrade -y
 echo "[2/8] Installing core tools..."
 sudo apt install -y \
   python3 python3-pip python3-venv \
-  git curl wget unzip \
+  git curl wget unzip gnupg \
   wireshark tcpdump \
   net-tools nmap \
-  docker.io docker-compose \
-  mongodb-clients
+  docker.io docker-compose
 
 # Add current user to docker group (no sudo needed after logout/login)
 sudo usermod -aG docker "$USER"
+
+# ── 2b. Install MongoDB (requires its own repository on Ubuntu 24.04) ──
+echo "[2b] Adding MongoDB 7.0 repository and installing..."
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
+  sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] \
+https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | \
+  sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+sudo apt update -y
+sudo apt install -y mongodb-org
+
+sudo systemctl start mongod
+sudo systemctl enable mongod
+echo "MongoDB installed and running."
 
 # ── 3. Python virtual environment ────────────────────────
 echo "[3/8] Creating Python virtual environment..."
