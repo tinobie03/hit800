@@ -38,7 +38,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH      = os.getenv("DB_PATH",      "/app/ids.db")
+DB_PATH      = os.getenv("DB_PATH",      "/data/ids.db")
+
 THRESHOLD    = float(os.getenv("THRESHOLD", "0.40"))
 
 MODEL_PATH   = os.getenv("MODEL_PATH",  "model/onemoney_cnn.h5")

@@ -1,31 +1,13 @@
-# ============================================================
-# OneMoney Predictive IDS — SQLite-based Architecture
-#
-# Services:
-#   inference  — CNN polling service + iptables IPS
-#   api        — FastAPI backend for the React dashboard
-#
-# Database: SQLite (/tmp/ids.db)
-#
-# Run: docker-compose up -d
-# API:       http://localhost:8000
-# API docs:  http://localhost:8000/docs
-# ============================================================
-
 version: '3.8'
 
 services:
-
-  # ── Inference Service (CNN + iptables IPS) ────────────────
-  # Uses host networking so iptables rules affect the real VM network.
-  # privileged: true is required for iptables on host.
   inference:
     build:
       context: .
       dockerfile: inference/Dockerfile
     container_name: ids-inference
-    network_mode: host      # gives access to host iptables
-    privileged: true        # required for iptables
+    network_mode: host
+    privileged: true
     restart: unless-stopped
     environment:
       - DB_PATH=/data/ids.db
@@ -38,17 +20,14 @@ services:
       - ./logs:/app/logs
       - ./data:/data
 
-  # ── FastAPI Backend ───────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: api/Dockerfile
     container_name: ids-api
-    network_mode: host      # consistent with inference; port 8000 direct on host
+    network_mode: host
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
+    privileged: true
     environment:
       - DB_PATH=/data/ids.db
       - THRESHOLD=0.40
@@ -56,7 +35,3 @@ services:
       - SCALER_PATH=model/scaler.pkl
     volumes:
       - ./data:/data
-
-networks:
-  ids-network:
-    driver: bridge

@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DB_PATH       = os.getenv("DB_PATH",        "/app/ids.db")
+DB_PATH       = os.getenv("DB_PATH",        "/data/ids.db")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 BATCH_SIZE    = int(os.getenv("BATCH_SIZE",    "500"))
 THRESHOLD     = float(os.getenv("THRESHOLD",   "0.40"))

@@ -1,0 +1,15 @@
+{
+  "accuracy": 0.7935,
+  "attack_recall": 0.6471,
+  "false_pos_rate": 0.1091,
+  "f1_score": 0.7146,
+  "roc_auc": 0.845,
+  "confusion_matrix": {
+    "TN": 1070,
+    "FP": 131,
+    "FN": 282,
+    "TP": 517
+  },
+  "threshold": 0.5,
+  "test_samples": 2000
+}
