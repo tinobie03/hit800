@@ -1,21 +1,26 @@
 """
 api/main.py
 ===========
-FastAPI backend — serves alert data to the React dashboard.
+OneMoney IDS — FastAPI backend.
 
-Endpoints:
-  GET  /                      — health check
-  GET  /api/alerts            — recent alerts (paginated)
-  GET  /api/alerts/summary    — counts by severity and prediction
-  GET  /api/alerts/timeline   — alert counts over time (for charts)
-  GET  /api/metrics           — model evaluation metrics
-  POST /api/predict           — run CNN on a single log entry (demo)
+Endpoints
+---------
+GET  /                    health check
+POST /api/predict         run CNN on a single feature vector (threshold 0.40)
+GET  /api/alerts          recent alerts (paginated, filterable)
+GET  /api/stats           summary counts and top attacker IPs
+GET  /api/blocked         currently blocked IP addresses
+POST /api/block           manually block an IP
+DELETE /api/unblock/{ip}  unblock an IP
 
-Run with:
+Run:
   uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 """
 
 import os
+import sqlite3
+import json
+import subprocess
 import logging
 import numpy as np
 import joblib
@@ -24,251 +29,390 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from elasticsearch import Elasticsearch
-from pymongo import MongoClient
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Logging ──────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Config ───────────────────────────────────────────────
-ES_HOST      = os.getenv("ES_HOST",    "http://localhost:9200")
-MONGO_URI    = os.getenv("MONGO_URI",  "mongodb://localhost:27017")
-MONGO_DB     = os.getenv("MONGO_DB",   "ids_db")
-ALERT_COLL   = os.getenv("ALERT_COLL", "alerts")
-ALERT_INDEX  = os.getenv("ALERT_INDEX","ids-alerts")
-BEST_MODEL   = "data/models/cnn_ids_best.h5"
-SCALER_PATH  = "data/processed/scaler.pkl"
-FEATURE_COLS = "data/processed/feature_cols.npy"
+# ── Config ────────────────────────────────────────────────────────────────────
+DB_PATH      = os.getenv("DB_PATH",      "/app/ids.db")
+THRESHOLD    = float(os.getenv("THRESHOLD", "0.40"))
 
-# ── App setup ────────────────────────────────────────────
+MODEL_PATH   = os.getenv("MODEL_PATH",  "model/onemoney_cnn.h5")
+SCALER_PATH  = os.getenv("SCALER_PATH", "model/scaler.pkl")
+
+FEATURES = [
+    "Flow Duration", "Tot Fwd Pkts", "Tot Bwd Pkts",
+    "TotLen Fwd Pkts", "TotLen Bwd Pkts",
+    "Fwd Pkt Len Max", "Fwd Pkt Len Min", "Fwd Pkt Len Mean", "Fwd Pkt Len Std",
+    "Bwd Pkt Len Max", "Bwd Pkt Len Min", "Bwd Pkt Len Mean", "Bwd Pkt Len Std",
+    "Flow Byts/s", "Flow Pkts/s",
+    "Flow IAT Mean", "Flow IAT Std", "Flow IAT Max", "Flow IAT Min",
+    "Fwd IAT Tot", "Fwd IAT Mean", "Fwd IAT Std", "Fwd IAT Max", "Fwd IAT Min",
+    "Bwd IAT Tot", "Bwd IAT Mean", "Bwd IAT Std", "Bwd IAT Max", "Bwd IAT Min",
+    "Fwd PSH Flags", "Bwd PSH Flags", "Fwd URG Flags", "Bwd URG Flags",
+    "Fwd Header Len", "Bwd Header Len",
+    "Fwd Pkts/s", "Bwd Pkts/s",
+    "Pkt Len Min", "Pkt Len Max", "Pkt Len Mean", "Pkt Len Std", "Pkt Len Var",
+    "FIN Flag Cnt", "SYN Flag Cnt", "RST Flag Cnt", "PSH Flag Cnt",
+    "ACK Flag Cnt", "URG Flag Cnt", "CWE Flag Count", "ECE Flag Cnt",
+    "Down/Up Ratio", "Pkt Size Avg",
+    "Fwd Seg Size Avg", "Bwd Seg Size Avg",
+    "Fwd Byts/b Avg", "Fwd Pkts/b Avg", "Fwd Blk Rate Avg",
+    "Bwd Byts/b Avg", "Bwd Pkts/b Avg", "Bwd Blk Rate Avg",
+    "Subflow Fwd Pkts", "Subflow Fwd Byts", "Subflow Bwd Pkts", "Subflow Bwd Byts",
+    "Init Fwd Win Byts", "Init Bwd Win Byts",
+    "Fwd Act Data Pkts", "Fwd Seg Size Min",
+    "Active Mean", "Active Std", "Active Max", "Active Min",
+    "Idle Mean", "Idle Std", "Idle Max", "Idle Min",
+]
+
+# ── Lazy singletons ───────────────────────────────────────────────────────────
+_model  = None
+_scaler = None
+
+
+def get_model():
+    global _model, _scaler
+    if _model is None:
+        _model  = tf.keras.models.load_model(MODEL_PATH)
+        _scaler = joblib.load(SCALER_PATH)
+        log.info("Model and scaler loaded.")
+    return _model, _scaler
+
+
+def get_db():
+    return sqlite3.connect(DB_PATH)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _iptables(args: list) -> bool:
+    try:
+        r = subprocess.run(["iptables"] + args, capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _apply_block(ip: str):
+    _iptables(["-I", "INPUT",  "-s", ip, "-j", "DROP"])
+    _iptables(["-I", "OUTPUT", "-d", ip, "-j", "DROP"])
+
+
+def _remove_block(ip: str):
+    _iptables(["-D", "INPUT",  "-s", ip, "-j", "DROP"])
+    _iptables(["-D", "OUTPUT", "-d", ip, "-j", "DROP"])
+
+
+# ── Pydantic schemas ──────────────────────────────────────────────────────────
+
+class PredictRequest(BaseModel):
+    features: dict = Field(..., description="Map of feature_name → numeric value")
+
+
+class PredictResponse(BaseModel):
+    prediction:   str
+    attack_prob:  float
+    severity:     str
+    threshold:    float
+    probabilities: dict
+
+
+class AlertOut(BaseModel):
+    timestamp:   str
+    source_host: str
+    source_ip:   Optional[str]
+    prediction:  str
+    severity:    str
+    attack_prob: float
+    blocked:     bool = False
+
+
+class BlockRequest(BaseModel):
+    ip:     str
+    reason: str = "manual"
+
+
+class BlockedIP(BaseModel):
+    ip:         str
+    reason:     str
+    blocked_at: str
+    active:     bool
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
 app = FastAPI(
-    title="Predictive IDS API",
-    description="CNN-based Intrusion Detection System for VMware MFS Environments",
-    version="1.0.0"
+    title="OneMoney Predictive IDS API",
+    description="CNN-based IDS/IPS for VMware Mobile Financial Services — HIT 800 Research",
+    version="2.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],    # restrict to dashboard domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Lazy-load model, scaler, clients ─────────────────────
-_model   = None
-_scaler  = None
-_feats   = None
-_es      = None
-_mongo   = None
 
-
-def get_model():
-    global _model, _scaler, _feats
-    if _model is None:
-        _model  = tf.keras.models.load_model(BEST_MODEL)
-        _scaler = joblib.load(SCALER_PATH)
-        _feats  = np.load(FEATURE_COLS, allow_pickle=True).tolist()
-    return _model, _scaler, _feats
-
-
-def get_es() -> Elasticsearch:
-    global _es
-    if _es is None:
-        _es = Elasticsearch(ES_HOST)
-    return _es
-
-
-def get_mongo():
-    global _mongo
-    if _mongo is None:
-        client = MongoClient(MONGO_URI)
-        _mongo = client[MONGO_DB][ALERT_COLL]
-    return _mongo
-
-
-# ── Pydantic schemas ─────────────────────────────────────
-class LogEntry(BaseModel):
-    """Single log entry for on-demand prediction."""
-    features: dict   # field_name: value pairs
-
-
-class AlertOut(BaseModel):
-    timestamp  : str
-    source_host: str
-    source_ip  : Optional[str]
-    prediction : str
-    severity   : str
-    confidence : float
-
-
-# ── Routes ───────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def health():
     return {
-        "status" : "running",
-        "service": "Predictive IDS API",
-        "version": "1.0.0",
-        "time"   : datetime.now(timezone.utc).isoformat()
+        "status":  "running",
+        "service": "OneMoney Predictive IDS API",
+        "version": "2.0.0",
+        "threshold": THRESHOLD,
+        "time":    datetime.now(timezone.utc).isoformat(),
     }
 
 
-@app.get("/api/alerts", response_model=List[AlertOut])
-def get_alerts(
-    limit    : int = Query(50, ge=1, le=500),
-    severity : Optional[str] = Query(None, description="CRITICAL|HIGH|MEDIUM|LOW"),
-    hours    : int = Query(24, ge=1, le=168, description="Last N hours"),
-):
+@app.post("/api/predict", response_model=PredictResponse)
+def predict(entry: PredictRequest):
     """
-    Return recent alerts from MongoDB.
-    Filter by severity and time window.
+    Run the CNN on a single CICFlowMeter feature vector.
+    Returns ATTACK if attack_prob >= threshold (0.40).
     """
-    coll = get_mongo()
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    query: dict = {"indexed_at": {"$gte": since.isoformat()}}
-    if severity:
-        query["severity"] = severity.upper()
+    model, scaler = get_model()
 
-    docs = list(
-        coll.find(query, {"_id": 0})
-            .sort("timestamp", -1)
-            .limit(limit)
+    row = np.array(
+        [[float(entry.features.get(f, 0.0)) for f in FEATURES]],
+        dtype=np.float32
     )
-    return docs
+    row = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
+    row_s = scaler.transform(row)
+    row_c = row_s.reshape(1, len(FEATURES), 1)
 
+    proba = model.predict(row_c, verbose=0)[0]
+    if len(proba.shape) == 0 or proba.shape[0] == 1:
+        attack_prob = float(proba) if len(proba.shape) == 0 else float(proba[0])
+        benign_prob = 1.0 - attack_prob
+    else:
+        benign_prob = float(proba[0])
+        attack_prob = float(proba[1])
 
-@app.get("/api/alerts/summary")
-def get_summary(hours: int = Query(24, ge=1, le=168)):
-    """Alert counts grouped by severity and prediction class."""
-    coll  = get_mongo()
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    is_attack = attack_prob >= THRESHOLD
 
-    pipeline = [
-        {"$match": {"indexed_at": {"$gte": since.isoformat()}}},
-        {"$group": {
-            "_id"  : {"severity": "$severity", "prediction": "$prediction"},
-            "count": {"$sum": 1}
-        }}
-    ]
-    results = list(coll.aggregate(pipeline))
-
-    # Also get ES total
-    es = get_es()
-    try:
-        es_total = es.count(index=ALERT_INDEX)["count"]
-    except Exception:
-        es_total = -1
-
-    severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
-    total_attacks   = 0
-    total_benign    = 0
-
-    for r in results:
-        sev  = r["_id"].get("severity", "NONE")
-        pred = r["_id"].get("prediction", "BENIGN")
-        cnt  = r["count"]
-        severity_counts[sev] = severity_counts.get(sev, 0) + cnt
-        if pred == "ATTACK":
-            total_attacks += cnt
+    sev = "NONE"
+    if is_attack:
+        if attack_prob >= 0.95:
+            sev = "CRITICAL"
+        elif attack_prob >= 0.80:
+            sev = "HIGH"
+        elif attack_prob >= 0.60:
+            sev = "MEDIUM"
         else:
-            total_benign  += cnt
+            sev = "LOW"
 
-    return {
-        "period_hours"   : hours,
-        "total_attacks"  : total_attacks,
-        "total_benign"   : total_benign,
-        "severity_counts": severity_counts,
-        "es_index_total" : es_total,
-    }
+    return PredictResponse(
+        prediction="ATTACK" if is_attack else "BENIGN",
+        attack_prob=round(attack_prob, 4),
+        severity=sev,
+        threshold=THRESHOLD,
+        probabilities={
+            "BENIGN": round(benign_prob, 4),
+            "ATTACK": round(attack_prob, 4),
+        },
+    )
 
 
-@app.get("/api/alerts/timeline")
-def get_timeline(
-    hours     : int = Query(24, ge=1, le=168),
-    bucket_min: int = Query(60, description="Bucket size in minutes"),
+@app.get("/api/alerts")
+def get_alerts(
+    limit:    int = Query(50, ge=1, le=500),
+    skip:     int = Query(0, ge=0),
+    severity: Optional[str] = Query(None, description="CRITICAL|HIGH|MEDIUM|LOW|NONE"),
+    hours:    int = Query(24, ge=1, le=720),
+    ip:       Optional[str] = Query(None, description="Filter by source IP"),
 ):
+    """Recent attack alerts from SQLite, newest first."""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+        where_clauses = ["indexed_at >= ?", "prediction = 'ATTACK'"]
+        params = [since]
+
+        if severity:
+            where_clauses.append("severity = ?")
+            params.append(severity.upper())
+        if ip:
+            where_clauses.append("source_ip = ?")
+            params.append(ip)
+
+        where_sql = " AND ".join(where_clauses)
+
+        c.execute(f"SELECT COUNT(*) as count FROM alerts WHERE {where_sql}", params)
+        total = c.fetchone()[0]
+
+        c.execute(
+            f"SELECT * FROM alerts WHERE {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params + [limit, skip]
+        )
+        rows = c.fetchall()
+
+        alerts = []
+        for row in rows:
+            alerts.append({
+                "timestamp": row[1],
+                "source_host": row[2],
+                "source_ip": row[3],
+                "prediction": row[4],
+                "severity": row[5],
+                "attack_prob": row[6],
+                "blocked": bool(row[7]),
+                "indexed_at": row[8],
+            })
+
+        conn.close()
+        return {"total": total, "limit": limit, "skip": skip, "alerts": alerts}
+    except Exception as exc:
+        log.error(f"SQLite query error: {exc}")
+        return {"total": 0, "limit": limit, "skip": skip, "alerts": []}
+
+
+@app.get("/api/stats")
+def get_stats(hours: int = Query(24, ge=1, le=720)):
     """
-    Alert counts bucketed by time interval — used to draw the timeline chart.
-    Returns list of {time, attack_count, benign_count}.
+    Summary statistics for the dashboard.
+    Returns total counts, severity breakdown, top attacker IPs.
     """
-    coll  = get_mongo()
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
-    pipeline = [
-        {"$match": {"indexed_at": {"$gte": since.isoformat()}}},
-        {"$project": {
-            "prediction": 1,
-            "bucket": {
-                "$dateToString": {
-                    "format": "%Y-%m-%dT%H:00:00Z",
-                    "date"  : {"$toDate": "$timestamp"}
-                }
-            }
-        }},
-        {"$group": {
-            "_id"         : {"bucket": "$bucket", "prediction": "$prediction"},
-            "count"       : {"$sum": 1}
-        }},
-        {"$sort": {"_id.bucket": 1}}
-    ]
+        c.execute(
+            "SELECT COUNT(*) FROM alerts WHERE indexed_at >= ? AND prediction = 'ATTACK'",
+            (since,)
+        )
+        total_attacks = c.fetchone()[0]
 
-    results = list(coll.aggregate(pipeline))
-    buckets: dict = {}
-    for r in results:
-        b    = r["_id"]["bucket"]
-        pred = r["_id"]["prediction"]
-        cnt  = r["count"]
-        if b not in buckets:
-            buckets[b] = {"time": b, "attack_count": 0, "benign_count": 0}
-        if pred == "ATTACK":
-            buckets[b]["attack_count"] += cnt
-        else:
-            buckets[b]["benign_count"] += cnt
+        c.execute("SELECT COUNT(*) FROM blocked_ips WHERE active = 1")
+        blocked_count = c.fetchone()[0]
 
-    return list(buckets.values())
-
-
-@app.get("/api/metrics")
-def get_metrics():
-    """Return saved evaluation metrics from logs/model_comparison.csv."""
-    import pandas as pd
-    csv_path = "logs/model_comparison.csv"
-    if not os.path.exists(csv_path):
-        raise HTTPException(status_code=404,
-                            detail="Model comparison not found. Run model/evaluate.py first.")
-    df = pd.read_csv(csv_path)
-    return df.to_dict(orient="records")
-
-
-@app.post("/api/predict")
-def predict_single(entry: LogEntry):
-    """
-    Run CNN on a single log entry (for demo / manual testing).
-    Body: {"features": {"col1": val1, "col2": val2, ...}}
-    """
-    model, scaler, feature_cols = get_model()
-
-    row = [float(entry.features.get(col, 0.0)) for col in feature_cols]
-    X   = np.array([row], dtype=np.float32)
-    X_s = scaler.transform(X)
-    X_c = X_s.reshape(1, 1, len(feature_cols))
-
-    proba      = model.predict(X_c, verbose=0)[0]
-    pred_class = int(np.argmax(proba))
-    confidence = float(np.max(proba))
-
-    return {
-        "prediction"  : "ATTACK" if pred_class == 1 else "BENIGN",
-        "confidence"  : round(confidence, 4),
-        "probabilities": {
-            "BENIGN": round(float(proba[0]), 4),
-            "ATTACK": round(float(proba[1]), 4)
+        severity_counts = {
+            "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0
         }
-    }
+        c.execute(
+            "SELECT severity, COUNT(*) as count FROM alerts WHERE indexed_at >= ? AND prediction = 'ATTACK' GROUP BY severity",
+            (since,)
+        )
+        for row in c.fetchall():
+            severity_counts[row[0]] = row[1]
+
+        c.execute(
+            "SELECT source_ip, COUNT(*) as count FROM alerts WHERE indexed_at >= ? AND prediction = 'ATTACK' GROUP BY source_ip ORDER BY count DESC LIMIT 10",
+            (since,)
+        )
+        top_attackers = [{"ip": row[0], "count": row[1]} for row in c.fetchall()]
+
+        conn.close()
+
+        return {
+            "period_hours":    hours,
+            "total_alerts":    total_attacks,
+            "blocked_ips":     blocked_count,
+            "severity_counts": severity_counts,
+            "top_attackers":   top_attackers,
+            "threshold":       THRESHOLD,
+        }
+    except Exception as exc:
+        log.error(f"SQLite stats error: {exc}")
+        return {
+            "period_hours":    hours,
+            "total_alerts":    0,
+            "blocked_ips":     0,
+            "severity_counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
+            "top_attackers":   [],
+            "threshold":       THRESHOLD,
+        }
+
+
+@app.get("/api/blocked", response_model=List[BlockedIP])
+def get_blocked():
+    """List all currently active IP blocks."""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT ip, reason, blocked_at, active FROM blocked_ips WHERE active = 1")
+        docs = []
+        for row in c.fetchall():
+            docs.append({
+                "ip": row[0],
+                "reason": row[1],
+                "blocked_at": row[2],
+                "active": bool(row[3])
+            })
+        conn.close()
+        return docs
+    except Exception as exc:
+        log.error(f"SQLite blocked IPs query error: {exc}")
+        return []
+
+
+@app.post("/api/block", response_model=BlockedIP)
+def block_ip(req: BlockRequest):
+    """
+    Manually block an IP address via iptables and record in SQLite.
+    The inference service also picks this up on its next poll.
+    """
+    ip = req.ip.strip()
+    if not ip:
+        raise HTTPException(status_code=422, detail="IP address is required.")
+
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        _apply_block(ip)
+
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO blocked_ips (ip, reason, blocked_at, active) VALUES (?, ?, ?, ?)",
+            (ip, req.reason, now, 1)
+        )
+        conn.commit()
+        conn.close()
+        log.info(f"Manually blocked IP: {ip}  reason={req.reason}")
+
+        return {
+            "ip": ip,
+            "reason": req.reason,
+            "blocked_at": now,
+            "active": True
+        }
+    except Exception as exc:
+        log.error(f"Block IP error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to block IP")
+
+
+@app.delete("/api/unblock/{ip}")
+def unblock_ip(ip: str):
+    """
+    Remove an IP block: delete iptables rules and mark inactive in SQLite.
+    """
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE blocked_ips SET active = 0 WHERE ip = ?", (ip,))
+        if c.rowcount == 0:
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"IP {ip} not found in block list.")
+        conn.commit()
+        conn.close()
+
+        _remove_block(ip)
+        log.info(f"Unblocked IP: {ip}")
+        return {"status": "unblocked", "ip": ip}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error(f"Unblock IP error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to unblock IP")

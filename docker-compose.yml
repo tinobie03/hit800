@@ -1,78 +1,61 @@
 # ============================================================
-# Predictive IDS - ELK Stack + MongoDB
-# Run with: docker-compose up -d
-# Kibana:        http://localhost:5601
-# Elasticsearch: http://localhost:9200
-# MongoDB:       localhost:27017
+# OneMoney Predictive IDS — SQLite-based Architecture
+#
+# Services:
+#   inference  — CNN polling service + iptables IPS
+#   api        — FastAPI backend for the React dashboard
+#
+# Database: SQLite (/tmp/ids.db)
+#
+# Run: docker-compose up -d
+# API:       http://localhost:8000
+# API docs:  http://localhost:8000/docs
 # ============================================================
 
 version: '3.8'
 
 services:
 
-  # ── Elasticsearch ────────────────────────────────────────
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
-    container_name: ids-elasticsearch
+  # ── Inference Service (CNN + iptables IPS) ────────────────
+  # Uses host networking so iptables rules affect the real VM network.
+  # privileged: true is required for iptables on host.
+  inference:
+    build:
+      context: .
+      dockerfile: inference/Dockerfile
+    container_name: ids-inference
+    network_mode: host      # gives access to host iptables
+    privileged: true        # required for iptables
+    restart: unless-stopped
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false       # Disabled for dev; enable in production
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m    # Tune for your VM RAM
-    ports:
-      - "9200:9200"
+      - DB_PATH=/data/ids.db
+      - POLL_INTERVAL=10
+      - BATCH_SIZE=500
+      - THRESHOLD=0.40
+      - MODEL_PATH=model/onemoney_cnn.h5
+      - SCALER_PATH=model/scaler.pkl
     volumes:
-      - es_data:/usr/share/elasticsearch/data
-    networks:
-      - ids-network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
+      - ./logs:/app/logs
+      - ./data:/data
 
-  # ── Logstash ─────────────────────────────────────────────
-  logstash:
-    image: docker.elastic.co/logstash/logstash:8.13.0
-    container_name: ids-logstash
-    ports:
-      - "5044:5044"    # Beats input
-      - "9600:9600"    # Logstash monitoring API
-    volumes:
-      - ./config/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
-    networks:
-      - ids-network
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-
-  # ── Kibana ───────────────────────────────────────────────
-  kibana:
-    image: docker.elastic.co/kibana/kibana:8.13.0
-    container_name: ids-kibana
-    ports:
-      - "5601:5601"
+  # ── FastAPI Backend ───────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: ids-api
+    network_mode: host      # consistent with inference; port 8000 direct on host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-    networks:
-      - ids-network
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-
-  # ── MongoDB ──────────────────────────────────────────────
-  mongodb:
-    image: mongo:7.0
-    container_name: ids-mongodb
-    ports:
-      - "27017:27017"
+      - DB_PATH=/data/ids.db
+      - THRESHOLD=0.40
+      - MODEL_PATH=model/onemoney_cnn.h5
+      - SCALER_PATH=model/scaler.pkl
     volumes:
-      - mongo_data:/data/db
-    networks:
-      - ids-network
-
-volumes:
-  es_data:
-  mongo_data:
+      - ./data:/data
 
 networks:
   ids-network:
