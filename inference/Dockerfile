@@ -1,8 +1,9 @@
 FROM python:3.11-slim
 
-# iptables for IP blocking, curl for healthchecks
+# iptables for IP blocking, curl for healthchecks, libpcap for packet capture
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends iptables iproute2 curl && \
+    apt-get install -y --no-install-recommends \
+    iptables iproute2 curl libpcap-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

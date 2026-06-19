@@ -1,6 +1,26 @@
 version: '3.8'
 
 services:
+  # Packet capture service - sniffs live network traffic
+  packet-capture:
+    build:
+      context: .
+      dockerfile: inference/Dockerfile
+    container_name: ids-packet-capture
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    environment:
+      - DB_PATH=/data/ids.db
+      - CAPTURE_INTERFACE=eth0
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/data
+    command: ["python", "-m", "inference.packet_capture"]
+    profiles:
+      - packet-capture
+
+  # Inference service - reads logs and classifies with CNN
   inference:
     build:
       context: .
