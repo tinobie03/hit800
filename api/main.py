@@ -33,6 +33,7 @@ from ids_core.database import connect, init_schema
 from ids_core.features import FEATURES
 from ids_core.firewall import block_ip as apply_firewall_block
 from ids_core.firewall import normalize_ip, unblock_ip as remove_firewall_block
+from seed_whitelist import seed_whitelist
 
 load_dotenv()
 
@@ -124,6 +125,7 @@ app = FastAPI(
 )
 
 init_schema(DB_PATH)
+seed_whitelist()  # Protect critical IPs from auto-blocking on startup
 
 app.add_middleware(
     CORSMiddleware,
