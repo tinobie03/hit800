@@ -31,7 +31,7 @@ services:
       - DB_PATH=/data/ids.db
       - POLL_INTERVAL=10
       - BATCH_SIZE=500
-      - THRESHOLD=0.40
+      - THRESHOLD=0.60
       - MODEL_PATH=model/onemoney_cnn.h5
       - SCALER_PATH=model/scaler.pkl
     volumes:
