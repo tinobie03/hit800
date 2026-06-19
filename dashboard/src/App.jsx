@@ -1,13 +1,13 @@
 import React, { useState } from 'react'
 import { useIDS } from './hooks/useIDS.js'
-import Header       from './components/Header.jsx'
-import StatsRow     from './components/StatsRow.jsx'
-import AlertsChart  from './components/AlertsChart.jsx'
-import TopIPsChart  from './components/TopIPsChart.jsx'
-import AlertsTable  from './components/AlertsTable.jsx'
-import BlockedIPs   from './components/BlockedIPs.jsx'
-import TimeFilter   from './components/TimeFilter.jsx'
-import FlowPredictor from './components/FlowPredictor.jsx'
+import Header           from './components/Header.jsx'
+import StatsRow         from './components/StatsRow.jsx'
+import AlertsChart      from './components/AlertsChart.jsx'
+import TopIPsChart      from './components/TopIPsChart.jsx'
+import AlertsTable      from './components/AlertsTable.jsx'
+import BlockedIPs       from './components/BlockedIPs.jsx'
+import TimeFilter       from './components/TimeFilter.jsx'
+import LiveFlowPredictor from './components/LiveFlowPredictor.jsx'
 
 function Skeleton() {
   return (
@@ -106,9 +106,9 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── Row 4: Flow Predictor (Ad-hoc testing) ── */}
-            <div className="max-w-2xl">
-              <FlowPredictor />
+            {/* ── Row 4: Live Flow Predictor (Real-time + Manual modes) ── */}
+            <div className="max-w-3xl">
+              <LiveFlowPredictor />
             </div>
 
             {/* ── Footer ── */}
