@@ -5,3 +5,4 @@ scikit-learn==1.5.0
 elasticsearch==8.13.0
 pymongo==4.7.2
 python-dotenv==1.0.1
+scapy==2.5.0
