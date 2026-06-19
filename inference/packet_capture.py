@@ -269,7 +269,7 @@ def flush_flows_to_db():
 def start_capture():
     """Start packet capture loop."""
     log.info("Starting packet capture...")
-    log.info(f"Interface: {INTERFACE or 'all'}")
+    log.info(f"Interface: {INTERFACE or 'auto-detect'}")
     log.info(f"Batch size: {PACKET_COUNT}")
 
     # Flush flows periodically
@@ -287,7 +287,7 @@ def start_capture():
     try:
         sniff(
             prn=packet_callback,
-            iface=INTERFACE,
+            iface=INTERFACE,  # None = auto-detect
             store=False,
             filter="ip",  # Only IP packets
         )
