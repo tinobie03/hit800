@@ -57,7 +57,7 @@ export default function Header({ health, countdown, lastUpdate, onRefresh }) {
           </svg>
           <span className="text-xs text-ids-sub">CNN Threshold</span>
           <span className="text-xs font-bold text-ids-warn">
-            {health?.threshold ?? '0.40'}
+            {health?.threshold ?? '0.50'}
           </span>
         </div>
 

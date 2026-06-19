@@ -373,7 +373,7 @@ export default function FlowPredictor() {
       <div className="pt-2 border-t border-ids-border/50 text-xs text-ids-muted space-y-1">
         <p>💡 <strong>Ad-hoc Testing:</strong> Use this to test the CNN model on individual flows.</p>
         <p>📊 <strong>Production Inference:</strong> The background service continuously monitors logs.</p>
-        <p>⚡ <strong>Threshold:</strong> attack_prob ≥ {prediction?.threshold || 0.40} = ATTACK</p>
+        <p>⚡ <strong>Threshold:</strong> attack_prob ≥ {prediction?.threshold ?? 0.50} = ATTACK</p>
       </div>
     </div>
   )

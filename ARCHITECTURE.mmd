@@ -1,45 +1,9 @@
-graph TB
-    subgraph Traffic["🌐 Network Traffic Layer"]
-        Attacker["Attacker VM<br/>(nmap, hping3, hydra)"]
-        IDS["IDS-Lab VM<br/>(OneMoney)"]
-        Attacker -->|attack traffic| IDS
-    end
-
-    subgraph DataLayer["📊 Data & Inference Layer"]
-        subgraph Docker["🐳 Docker Network"]
-            Logstash["Logstash<br/>(Log Pipeline)"]
-            ES["Elasticsearch<br/>(logs-*)"]
-            Mongo[("MongoDB<br/>(alerts, blocked_ips)")]
-            Inference["Inference Service<br/>(CNN IDS)"]
-            Kibana["Kibana<br/>(Dashboard)"]
-        end
-
-        IDS -->|CICFlowMeter logs| Logstash
-        Logstash -->|index| ES
-        ES -->|polls 10s| Inference
-        Inference -->|1D-CNN<br/>76 features| Model["🤖 Keras 1D-CNN<br/>(threshold: 0.40)"]
-        Model -->|predictions| Inference
-        Inference -->|iptables blocking| IPTables["iptables<br/>(IPS)"]
-        Inference -->|store alerts| Mongo
-        ES -->|ids-alerts index| Mongo
-        Kibana -->|queries| ES
-    end
-
-    subgraph APILayer["🔌 API & Frontend Layer"]
-        API["FastAPI Backend<br/>(port 8000)<br/>GET /api/alerts<br/>GET /api/stats<br/>POST /api/block<br/>DELETE /api/unblock"]
-        Dashboard["⚛️ React Dashboard<br/>Alert Monitoring<br/>IP Blocking<br/>Statistics"]
-
-        API -->|queries| Mongo
-        API -->|queries| ES
-        Dashboard -->|HTTP| API
-    end
-
-    Traffic --> DataLayer
-    DataLayer --> APILayer
-
-    style Traffic fill:#e1f5ff
-    style DataLayer fill:#f3e5f5
-    style APILayer fill:#e8f5e9
-    style Model fill:#fff3e0
-    style Docker fill:#fafafa
-    style Kibana fill:#ffe0b2
+flowchart LR
+    Network --> Capture[Bidirectional flow capture]
+    Capture --> Logs[(SQLite logs)]
+    Logs --> Inference[CNN inference]
+    Inference --> Alerts[(SQLite alerts)]
+    Inference --> Firewall[Host iptables]
+    Alerts --> API[FastAPI]
+    API --> Dashboard[React dashboard]
+    API --> Firewall

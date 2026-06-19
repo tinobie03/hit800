@@ -1,9 +1,11 @@
 {
   "accuracy": 0.7935,
+  "precision": 0.7978,
   "attack_recall": 0.6471,
   "false_pos_rate": 0.1091,
   "f1_score": 0.7146,
   "roc_auc": 0.845,
+  "latency_ms_per_sample": 0.0427,
   "confusion_matrix": {
     "TN": 1070,
     "FP": 131,

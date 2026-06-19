@@ -59,7 +59,7 @@ export default function StatsRow({ stats, health, lastAlertTime }) {
     statusIcon  = '⚠️'
   } else {
     statusValue = 'SECURE'
-    statusSub   = `Threshold ${health?.threshold ?? 0.40}`
+    statusSub   = `Threshold ${health?.threshold ?? 0.50}`
     statusColor = 'text-ids-safe'
     statusIcon  = '✅'
   }

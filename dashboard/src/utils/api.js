@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+export const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
@@ -21,8 +21,8 @@ export async function fetchHealth() {
     return {
       status:    root.status === 'running' ? 'ok' : 'error',
       model:     'onemoney_cnn',
-      mongodb:   'connected',
-      threshold: root.threshold ?? 0.40,
+      database:  'sqlite',
+      threshold: root.threshold ?? 0.50,
       timestamp: root.time,
     }
   }
@@ -73,4 +73,19 @@ export async function clearDatabase() {
   return request('/api/clear-db', {
     method: 'POST',
   })
+}
+
+export async function fetchWhitelist() {
+  return request('/api/whitelist')
+}
+
+export async function addWhitelist(ip, reason = 'manual') {
+  return request('/api/whitelist', {
+    method: 'POST',
+    body: JSON.stringify({ ip, reason }),
+  })
+}
+
+export async function removeWhitelist(ip) {
+  return request(`/api/whitelist/${encodeURIComponent(ip)}`, { method: 'DELETE' })
 }

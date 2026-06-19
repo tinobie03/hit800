@@ -6,7 +6,7 @@ OneMoney IDS — FastAPI backend.
 Endpoints
 ---------
 GET  /                    health check
-POST /api/predict         run CNN on a single feature vector (threshold 0.40)
+POST /api/predict         run CNN on a single feature vector
 GET  /api/alerts          recent alerts (paginated, filterable)
 GET  /api/stats           summary counts and top attacker IPs
 GET  /api/blocked         currently blocked IP addresses
@@ -18,9 +18,6 @@ Run:
 """
 
 import os
-import sqlite3
-import json
-import subprocess
 import logging
 import numpy as np
 import joblib
@@ -31,6 +28,10 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from ids_core.database import connect, init_schema
+from ids_core.features import FEATURES
+from ids_core.firewall import block_ip as apply_firewall_block
+from ids_core.firewall import normalize_ip, unblock_ip as remove_firewall_block
 
 load_dotenv()
 
@@ -38,38 +39,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH      = os.getenv("DB_PATH",      "/data/ids.db")
+DB_PATH      = os.getenv("DB_PATH",      "data/ids.db")
 
-THRESHOLD    = float(os.getenv("THRESHOLD", "0.40"))
+THRESHOLD    = float(os.getenv("THRESHOLD", "0.50"))
 
 MODEL_PATH   = os.getenv("MODEL_PATH",  "model/onemoney_cnn.h5")
 SCALER_PATH  = os.getenv("SCALER_PATH", "model/scaler.pkl")
-
-FEATURES = [
-    "Flow Duration", "Tot Fwd Pkts", "Tot Bwd Pkts",
-    "TotLen Fwd Pkts", "TotLen Bwd Pkts",
-    "Fwd Pkt Len Max", "Fwd Pkt Len Min", "Fwd Pkt Len Mean", "Fwd Pkt Len Std",
-    "Bwd Pkt Len Max", "Bwd Pkt Len Min", "Bwd Pkt Len Mean", "Bwd Pkt Len Std",
-    "Flow Byts/s", "Flow Pkts/s",
-    "Flow IAT Mean", "Flow IAT Std", "Flow IAT Max", "Flow IAT Min",
-    "Fwd IAT Tot", "Fwd IAT Mean", "Fwd IAT Std", "Fwd IAT Max", "Fwd IAT Min",
-    "Bwd IAT Tot", "Bwd IAT Mean", "Bwd IAT Std", "Bwd IAT Max", "Bwd IAT Min",
-    "Fwd PSH Flags", "Bwd PSH Flags", "Fwd URG Flags", "Bwd URG Flags",
-    "Fwd Header Len", "Bwd Header Len",
-    "Fwd Pkts/s", "Bwd Pkts/s",
-    "Pkt Len Min", "Pkt Len Max", "Pkt Len Mean", "Pkt Len Std", "Pkt Len Var",
-    "FIN Flag Cnt", "SYN Flag Cnt", "RST Flag Cnt", "PSH Flag Cnt",
-    "ACK Flag Cnt", "URG Flag Cnt", "CWE Flag Count", "ECE Flag Cnt",
-    "Down/Up Ratio", "Pkt Size Avg",
-    "Fwd Seg Size Avg", "Bwd Seg Size Avg",
-    "Fwd Byts/b Avg", "Fwd Pkts/b Avg", "Fwd Blk Rate Avg",
-    "Bwd Byts/b Avg", "Bwd Pkts/b Avg", "Bwd Blk Rate Avg",
-    "Subflow Fwd Pkts", "Subflow Fwd Byts", "Subflow Bwd Pkts", "Subflow Bwd Byts",
-    "Init Fwd Win Byts", "Init Bwd Win Byts",
-    "Fwd Act Data Pkts", "Fwd Seg Size Min",
-    "Active Mean", "Active Std", "Active Max", "Active Min",
-    "Idle Mean", "Idle Std", "Idle Max", "Idle Min",
-]
 
 # ── Lazy singletons ───────────────────────────────────────────────────────────
 _model  = None
@@ -81,56 +56,26 @@ def get_model():
     if _model is None:
         _model  = tf.keras.models.load_model(MODEL_PATH)
         _scaler = joblib.load(SCALER_PATH)
+        if getattr(_scaler, "n_features_in_", len(FEATURES)) != len(FEATURES):
+            raise RuntimeError("Scaler does not match the canonical 76-feature contract")
+        if tuple(_model.input_shape[1:]) != (len(FEATURES), 1):
+            raise RuntimeError("Model does not match the canonical 76-feature contract")
         log.info("Model and scaler loaded.")
     return _model, _scaler
 
 
 def get_db():
-    return sqlite3.connect(DB_PATH)
+    return connect(DB_PATH)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _iptables(args: list) -> bool:
-    try:
-        r = subprocess.run(["iptables"] + args, capture_output=True, text=True, timeout=5)
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
 def _apply_block(ip: str):
-    """Block incoming AND outgoing traffic from/to IP"""
-    try:
-        # Block incoming traffic FROM this IP
-        _iptables(["-I", "INPUT", "-s", ip, "-j", "DROP"])
-        # Block outgoing traffic TO this IP
-        _iptables(["-I", "OUTPUT", "-d", ip, "-j", "DROP"])
-        # Also block forward (in case forwarding is enabled)
-        _iptables(["-I", "FORWARD", "-s", ip, "-j", "DROP"])
-        _iptables(["-I", "FORWARD", "-d", ip, "-j", "DROP"])
-        log.info(f"Blocked IP {ip}: INPUT, OUTPUT, and FORWARD rules added")
-        return True
-    except Exception as exc:
-        log.error(f"Failed to block IP {ip}: {exc}")
-        return False
+    return apply_firewall_block(normalize_ip(ip))
 
 
 def _remove_block(ip: str):
-    """Remove all blocking rules for this IP"""
-    try:
-        # Remove incoming block
-        _iptables(["-D", "INPUT", "-s", ip, "-j", "DROP"])
-        # Remove outgoing block
-        _iptables(["-D", "OUTPUT", "-d", ip, "-j", "DROP"])
-        # Remove forward blocks
-        _iptables(["-D", "FORWARD", "-s", ip, "-j", "DROP"])
-        _iptables(["-D", "FORWARD", "-d", ip, "-j", "DROP"])
-        log.info(f"Unblocked IP {ip}: All rules removed")
-        return True
-    except Exception as exc:
-        log.error(f"Failed to unblock IP {ip}: {exc}")
-        return False
+    return remove_firewall_block(normalize_ip(ip))
 
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
@@ -177,6 +122,8 @@ app = FastAPI(
     version="2.0.0",
 )
 
+init_schema(DB_PATH)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -199,11 +146,28 @@ def health():
     }
 
 
+@app.get("/api/health")
+def api_health():
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1").fetchone()
+        database = "connected"
+    except Exception:
+        database = "error"
+    return {
+        "status": "ok" if database == "connected" else "error",
+        "model": "onemoney_cnn",
+        "database": database,
+        "threshold": THRESHOLD,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.post("/api/predict", response_model=PredictResponse)
 def predict(entry: PredictRequest):
     """
     Run the CNN on a single CICFlowMeter feature vector.
-    Returns ATTACK if attack_prob >= threshold (0.40).
+    Returns ATTACK if attack_prob >= the configured threshold.
     """
     model, scaler = get_model()
 
@@ -389,13 +353,15 @@ def block_ip(req: BlockRequest):
     Manually block an IP address via iptables and record in SQLite.
     The inference service also picks this up on its next poll.
     """
-    ip = req.ip.strip()
-    if not ip:
-        raise HTTPException(status_code=422, detail="IP address is required.")
+    try:
+        ip = normalize_ip(req.ip)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="A valid IP address is required.")
 
     try:
         now = datetime.now(timezone.utc).isoformat()
-        _apply_block(ip)
+        if not _apply_block(ip):
+            raise HTTPException(status_code=503, detail="Host firewall did not accept the block")
 
         conn = get_db()
         c = conn.cursor()
@@ -413,6 +379,8 @@ def block_ip(req: BlockRequest):
             "blocked_at": now,
             "active": True
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         log.error(f"Block IP error: {exc}")
         raise HTTPException(status_code=500, detail="Failed to block IP")
@@ -424,8 +392,13 @@ def unblock_ip(ip: str):
     Remove an IP block: delete iptables rules and mark inactive in SQLite.
     """
     try:
-        # Remove iptables rules first
+        try:
+            ip = normalize_ip(ip)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="A valid IP address is required.")
         iptables_success = _remove_block(ip)
+        if not iptables_success:
+            raise HTTPException(status_code=503, detail="Host firewall did not accept the unblock")
 
         # Update database
         conn = get_db()
@@ -466,13 +439,22 @@ def clear_database():
         # Get all active blocked IPs and remove them from iptables
         c.execute("SELECT ip FROM blocked_ips WHERE active = 1")
         blocked_ips = [row[0] for row in c.fetchall()]
+        failed_unblocks = []
         for ip in blocked_ips:
-            _remove_block(ip)
+            if not _remove_block(ip):
+                failed_unblocks.append(ip)
+        if failed_unblocks:
+            conn.close()
+            raise HTTPException(
+                status_code=503,
+                detail=f"Firewall cleanup failed for: {', '.join(failed_unblocks)}",
+            )
 
         # Clear all tables
         c.execute("DELETE FROM alerts")
         c.execute("DELETE FROM logs")
         c.execute("DELETE FROM blocked_ips")
+        c.execute("DELETE FROM service_state WHERE key = 'inference_last_log_id'")
         conn.commit()
         conn.close()
 
@@ -481,6 +463,8 @@ def clear_database():
             "status": "cleared",
             "message": f"All alerts, logs, and {len(blocked_ips)} blocked IPs deleted from database"
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         log.error(f"Clear database error: {exc}")
         raise HTTPException(status_code=500, detail="Failed to clear database")
@@ -581,14 +565,14 @@ def log_attack_end(req: AttackEndRequest):
             (now, "completed", req.attack_id)
         )
 
-        # Auto-label alerts within time window
-        # Alerts within 30 seconds after attack start are labeled with this attack type
-        c.execute("""
-            UPDATE alerts
-            SET attack_type = ?
-            WHERE indexed_at BETWEEN ? AND datetime(?, '+30 seconds')
-            AND (source_ip = ? OR source_ip LIKE ? || '%')
-        """, (attack_type, start_time, start_time, source_ip, source_ip.rsplit('.', 1)[0]))
+        if source_ip and source_ip != "0.0.0.0":
+            c.execute("""UPDATE alerts SET attack_type = ?
+                         WHERE indexed_at BETWEEN ? AND ? AND source_ip = ?""",
+                      (attack_type, start_time, now, source_ip))
+        else:
+            c.execute("""UPDATE alerts SET attack_type = ?
+                         WHERE indexed_at BETWEEN ? AND ?""",
+                      (attack_type, start_time, now))
 
         labeled_count = c.rowcount
         conn.commit()
@@ -633,9 +617,10 @@ def get_whitelist():
 @app.post("/api/whitelist", response_model=WhitelistIP)
 def add_whitelist(req: WhitelistIPRequest):
     """Add an IP to whitelist (won't be flagged as attack)"""
-    ip = req.ip.strip()
-    if not ip:
-        raise HTTPException(status_code=422, detail="IP address is required")
+    try:
+        ip = normalize_ip(req.ip)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="A valid IP address is required")
 
     try:
         now = datetime.now(timezone.utc).isoformat()
@@ -664,6 +649,10 @@ def add_whitelist(req: WhitelistIPRequest):
 def remove_whitelist(ip: str):
     """Remove an IP from whitelist"""
     try:
+        try:
+            ip = normalize_ip(ip)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="A valid IP address is required")
         conn = get_db()
         c = conn.cursor()
         c.execute("UPDATE whitelist SET active = 0 WHERE ip = ?", (ip,))

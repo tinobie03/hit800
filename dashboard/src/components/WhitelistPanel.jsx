@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { addWhitelist, fetchWhitelist as getWhitelist, removeWhitelist } from '../utils/api.js'
 
 export default function WhitelistPanel() {
   const [whitelist, setWhitelist] = useState([])
@@ -17,9 +18,7 @@ export default function WhitelistPanel() {
 
   async function fetchWhitelist() {
     try {
-      const res = await fetch('http://localhost:8000/api/whitelist')
-      if (!res.ok) throw new Error(`${res.status}`)
-      const data = await res.json()
+      const data = await getWhitelist()
       setWhitelist(Array.isArray(data) ? data : [])
     } catch (err) {
       console.error('Failed to fetch whitelist:', err)
@@ -39,16 +38,7 @@ export default function WhitelistPanel() {
     setSuccess('')
 
     try {
-      const res = await fetch('http://localhost:8000/api/whitelist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ip, reason: reason || 'manual' }),
-      })
-
-      if (!res.ok) {
-        const errData = await res.json()
-        throw new Error(errData.detail || 'Failed to add')
-      }
+      await addWhitelist(ip, reason || 'manual')
 
       setSuccess(`✓ Added ${ip} to whitelist`)
       setIpInput('')
@@ -68,11 +58,7 @@ export default function WhitelistPanel() {
     if (!window.confirm(`Remove ${ip} from whitelist?`)) return
 
     try {
-      const res = await fetch(`http://localhost:8000/api/whitelist/${ip}`, {
-        method: 'DELETE',
-      })
-
-      if (!res.ok) throw new Error('Failed to remove')
+      await removeWhitelist(ip)
 
       setSuccess(`✓ Removed ${ip}`)
       setTimeout(() => {

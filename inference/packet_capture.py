@@ -1,307 +1,262 @@
 #!/usr/bin/env python3
-"""
-packet_capture.py
-=================
-Captures network packets and extracts CICFlowMeter-style flow features.
-Writes logs directly to SQLite so inference service can classify them.
+"""Capture bidirectional five-tuple flows and write 76-feature rows to SQLite."""
 
-This bridges the gap between real network attacks and the IDS detection pipeline.
-
-Run with:
-  python -m inference.packet_capture
-
-Requires:
-  - scapy (pip install scapy)
-  - Must run with sudo (packet capture needs root)
-"""
-
-import os
-import sys
-import json
-import sqlite3
 import logging
-from datetime import datetime, timezone
-from collections import defaultdict
+import math
+import os
+import statistics
 import threading
 import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from scapy.all import ICMP, IP, TCP, UDP, sniff
+
+from ids_core.database import connect, init_schema
+from ids_core.features import FEATURES
 
 try:
-    from scapy.all import sniff, IP, TCP, UDP, ICMP
-except ImportError:
-    print("ERROR: scapy not installed. Install with: pip install scapy")
-    sys.exit(1)
-
-from dotenv import load_dotenv
-
+    from dotenv import load_dotenv
+except ImportError:  # Environment variables still work without a .env loader.
+    load_dotenv = lambda: None
 load_dotenv()
-
-# Logging setup
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("logs/packet_capture.log")
-    ]
+    handlers=[logging.StreamHandler(), logging.FileHandler("logs/packet_capture.log")],
 )
 log = logging.getLogger(__name__)
 
-# Config
-DB_PATH = os.getenv("DB_PATH", "/data/ids.db")
-INTERFACE = os.getenv("CAPTURE_INTERFACE", None)  # None = all interfaces
-PACKET_COUNT = int(os.getenv("PACKET_BATCH_SIZE", "100"))
+DB_PATH = os.getenv("DB_PATH", "data/ids.db")
+INTERFACE = os.getenv("CAPTURE_INTERFACE") or None
+FLOW_WINDOW = float(os.getenv("FLOW_WINDOW", "5"))
 
-# Flow tracking
-flows = defaultdict(dict)
+
+def _stats(values: list[float]) -> tuple[float, float, float, float]:
+    if not values:
+        return 0.0, 0.0, 0.0, 0.0
+    return (
+        statistics.fmean(values),
+        statistics.pstdev(values) if len(values) > 1 else 0.0,
+        max(values),
+        min(values),
+    )
+
+
+def _iats(times: list[float]) -> list[float]:
+    return [(b - a) * 1_000_000 for a, b in zip(times, times[1:])]
+
+
+def _active_idle(times: list[float], idle_threshold: float = 1.0) -> tuple[list[float], list[float]]:
+    """Return active-period durations and idle gaps in microseconds."""
+    if not times:
+        return [], []
+    active, idle = [], []
+    period_start = times[0]
+    previous = times[0]
+    for timestamp in times[1:]:
+        gap = timestamp - previous
+        if gap > idle_threshold:
+            active.append((previous - period_start) * 1_000_000)
+            idle.append(gap * 1_000_000)
+            period_start = timestamp
+        previous = timestamp
+    active.append((previous - period_start) * 1_000_000)
+    return active, idle
+
+
+def packet_tuple(packet):
+    ip = packet[IP]
+    if TCP in packet:
+        return 6, (ip.src, int(packet[TCP].sport)), (ip.dst, int(packet[TCP].dport))
+    if UDP in packet:
+        return 17, (ip.src, int(packet[UDP].sport)), (ip.dst, int(packet[UDP].dport))
+    if ICMP in packet:
+        return 1, (ip.src, 0), (ip.dst, 0)
+    return int(ip.proto), (ip.src, 0), (ip.dst, 0)
+
+
+def canonical_key(protocol: int, source: tuple, destination: tuple) -> tuple:
+    low, high = sorted((source, destination))
+    return protocol, low, high
+
+
+@dataclass
+class Direction:
+    lengths: list[int] = field(default_factory=list)
+    times: list[float] = field(default_factory=list)
+    header_bytes: int = 0
+    psh: int = 0
+    urg: int = 0
+    active_data: int = 0
+    initial_window: int = 0
+    segment_sizes: list[int] = field(default_factory=list)
+
+
+@dataclass
+class Flow:
+    protocol: int
+    forward_endpoint: tuple
+    source_ip: str
+    started: float
+    last_seen: float
+    forward: Direction = field(default_factory=Direction)
+    backward: Direction = field(default_factory=Direction)
+    all_lengths: list[int] = field(default_factory=list)
+    all_times: list[float] = field(default_factory=list)
+    flags: dict[str, int] = field(default_factory=lambda: {
+        "FIN": 0, "SYN": 0, "RST": 0, "PSH": 0,
+        "ACK": 0, "URG": 0, "CWE": 0, "ECE": 0,
+    })
+
+    def add(self, packet, source: tuple, timestamp: float) -> None:
+        direction = self.forward if source == self.forward_endpoint else self.backward
+        length = len(packet[IP])
+        header_length = int(getattr(packet[IP], "ihl", 5) or 5) * 4
+        payload_length = max(0, length - header_length)
+        if TCP in packet:
+            tcp = packet[TCP]
+            tcp_header = int(tcp.dataofs or 5) * 4
+            header_length += tcp_header
+            payload_length = len(bytes(tcp.payload))
+            if not direction.lengths:
+                direction.initial_window = int(tcp.window)
+            direction.segment_sizes.append(max(0, length - header_length))
+            for name, marker in (
+                ("FIN", "F"), ("SYN", "S"), ("RST", "R"), ("PSH", "P"),
+                ("ACK", "A"), ("URG", "U"), ("ECE", "E"), ("CWE", "C"),
+            ):
+                if marker in str(tcp.flags):
+                    self.flags[name] += 1
+            direction.psh += int("P" in str(tcp.flags))
+            direction.urg += int("U" in str(tcp.flags))
+        else:
+            direction.segment_sizes.append(payload_length)
+
+        direction.lengths.append(length)
+        direction.times.append(timestamp)
+        direction.header_bytes += header_length
+        direction.active_data += int(payload_length > 0)
+        self.all_lengths.append(length)
+        self.all_times.append(timestamp)
+        self.last_seen = timestamp
+
+    def features(self) -> dict[str, float]:
+        fwd, bwd = self.forward, self.backward
+        duration_us = max(0.0, (self.last_seen - self.started) * 1_000_000)
+        duration_s = max(duration_us / 1_000_000, 1e-6)
+        fmean, fstd, fmax, fmin = _stats(fwd.lengths)
+        bmean, bstd, bmax, bmin = _stats(bwd.lengths)
+        pmean, pstd, pmax, pmin = _stats(self.all_lengths)
+        flow_iat = _iats(self.all_times)
+        fwd_iat, bwd_iat = _iats(fwd.times), _iats(bwd.times)
+        imean, istd, imax, imin = _stats(flow_iat)
+        fimean, fistd, fimax, fimin = _stats(fwd_iat)
+        bimean, bistd, bimax, bimin = _stats(bwd_iat)
+        total_bytes = sum(self.all_lengths)
+        total_packets = len(self.all_lengths)
+        active, idle = _active_idle(self.all_times)
+        amean, astd, amax, amin = _stats(active)
+        idmean, idstd, idmax, idmin = _stats(idle)
+        values = {
+            "Flow Duration": duration_us,
+            "Tot Fwd Pkts": len(fwd.lengths), "Tot Bwd Pkts": len(bwd.lengths),
+            "TotLen Fwd Pkts": sum(fwd.lengths), "TotLen Bwd Pkts": sum(bwd.lengths),
+            "Fwd Pkt Len Max": fmax, "Fwd Pkt Len Min": fmin,
+            "Fwd Pkt Len Mean": fmean, "Fwd Pkt Len Std": fstd,
+            "Bwd Pkt Len Max": bmax, "Bwd Pkt Len Min": bmin,
+            "Bwd Pkt Len Mean": bmean, "Bwd Pkt Len Std": bstd,
+            "Flow Byts/s": total_bytes / duration_s, "Flow Pkts/s": total_packets / duration_s,
+            "Flow IAT Mean": imean, "Flow IAT Std": istd,
+            "Flow IAT Max": imax, "Flow IAT Min": imin,
+            "Fwd IAT Tot": sum(fwd_iat), "Fwd IAT Mean": fimean,
+            "Fwd IAT Std": fistd, "Fwd IAT Max": fimax, "Fwd IAT Min": fimin,
+            "Bwd IAT Tot": sum(bwd_iat), "Bwd IAT Mean": bimean,
+            "Bwd IAT Std": bistd, "Bwd IAT Max": bimax, "Bwd IAT Min": bimin,
+            "Fwd PSH Flags": fwd.psh, "Bwd PSH Flags": bwd.psh,
+            "Fwd URG Flags": fwd.urg, "Bwd URG Flags": bwd.urg,
+            "Fwd Header Len": fwd.header_bytes, "Bwd Header Len": bwd.header_bytes,
+            "Fwd Pkts/s": len(fwd.lengths) / duration_s,
+            "Bwd Pkts/s": len(bwd.lengths) / duration_s,
+            "Pkt Len Min": pmin, "Pkt Len Max": pmax, "Pkt Len Mean": pmean,
+            "Pkt Len Std": pstd, "Pkt Len Var": pstd ** 2,
+            "FIN Flag Cnt": self.flags["FIN"], "SYN Flag Cnt": self.flags["SYN"],
+            "RST Flag Cnt": self.flags["RST"], "PSH Flag Cnt": self.flags["PSH"],
+            "ACK Flag Cnt": self.flags["ACK"], "URG Flag Cnt": self.flags["URG"],
+            "CWE Flag Count": self.flags["CWE"], "ECE Flag Cnt": self.flags["ECE"],
+            "Down/Up Ratio": len(bwd.lengths) / max(len(fwd.lengths), 1),
+            "Pkt Size Avg": pmean, "Fwd Seg Size Avg": _stats(fwd.segment_sizes)[0],
+            "Bwd Seg Size Avg": _stats(bwd.segment_sizes)[0],
+            "Fwd Byts/b Avg": 0, "Fwd Pkts/b Avg": 0, "Fwd Blk Rate Avg": 0,
+            "Bwd Byts/b Avg": 0, "Bwd Pkts/b Avg": 0, "Bwd Blk Rate Avg": 0,
+            "Subflow Fwd Pkts": len(fwd.lengths), "Subflow Fwd Byts": sum(fwd.lengths),
+            "Subflow Bwd Pkts": len(bwd.lengths), "Subflow Bwd Byts": sum(bwd.lengths),
+            "Init Fwd Win Byts": fwd.initial_window, "Init Bwd Win Byts": bwd.initial_window,
+            "Fwd Act Data Pkts": fwd.active_data,
+            "Fwd Seg Size Min": min(fwd.segment_sizes) if fwd.segment_sizes else 0,
+            "Active Mean": amean, "Active Std": astd, "Active Max": amax, "Active Min": amin,
+            "Idle Mean": idmean, "Idle Std": idstd, "Idle Max": idmax, "Idle Min": idmin,
+        }
+        return {name: float(values[name]) if math.isfinite(float(values[name])) else 0.0 for name in FEATURES}
+
+
+flows: dict[tuple, Flow] = {}
 flow_lock = threading.Lock()
 
 
-def init_sqlite():
-    """Initialize SQLite with logs table if needed."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("""CREATE TABLE IF NOT EXISTS logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT,
-        source_ip TEXT,
-        source_host TEXT,
-        label TEXT,
-        data TEXT
-    )""")
-
-    conn.commit()
-    conn.close()
-    log.info(f"SQLite initialized: {DB_PATH}")
-
-
-def extract_flow_features(packet, direction="forward"):
-    """
-    Extract basic flow features from a packet.
-    Returns a dict of features that approximate CICFlowMeter format.
-    """
-    features = {
-        "Flow Duration": 0,
-        "Tot Fwd Pkts": 1 if direction == "forward" else 0,
-        "Tot Bwd Pkts": 0 if direction == "forward" else 1,
-        "TotLen Fwd Pkts": len(packet) if direction == "forward" else 0,
-        "TotLen Bwd Pkts": 0 if direction == "forward" else len(packet),
-        "Fwd Pkt Len Max": len(packet) if direction == "forward" else 0,
-        "Fwd Pkt Len Min": len(packet) if direction == "forward" else 0,
-        "Fwd Pkt Len Mean": len(packet) if direction == "forward" else 0,
-        "Fwd Pkt Len Std": 0,
-        "Bwd Pkt Len Max": len(packet) if direction == "backward" else 0,
-        "Bwd Pkt Len Min": len(packet) if direction == "backward" else 0,
-        "Bwd Pkt Len Mean": len(packet) if direction == "backward" else 0,
-        "Bwd Pkt Len Std": 0,
-        "Flow Byts/s": 0,
-        "Flow Pkts/s": 0,
-        "Flow IAT Mean": 0,
-        "Flow IAT Std": 0,
-        "Flow IAT Max": 0,
-        "Flow IAT Min": 0,
-        "Fwd IAT Tot": 0,
-        "Fwd IAT Mean": 0,
-        "Fwd IAT Std": 0,
-        "Fwd IAT Max": 0,
-        "Fwd IAT Min": 0,
-        "Bwd IAT Tot": 0,
-        "Bwd IAT Mean": 0,
-        "Bwd IAT Std": 0,
-        "Bwd IAT Max": 0,
-        "Bwd IAT Min": 0,
-        "Fwd PSH Flags": 0,
-        "Bwd PSH Flags": 0,
-        "Fwd URG Flags": 0,
-        "Bwd URG Flags": 0,
-        "Fwd Header Len": 20,  # IP header
-        "Bwd Header Len": 20,
-        "Fwd Pkts/s": 1,
-        "Bwd Pkts/s": 0,
-        "Pkt Len Min": len(packet),
-        "Pkt Len Max": len(packet),
-        "Pkt Len Mean": len(packet),
-        "Pkt Len Std": 0,
-        "Pkt Len Var": 0,
-        "FIN Flag Cnt": 0,
-        "SYN Flag Cnt": 0,
-        "RST Flag Cnt": 0,
-        "PSH Flag Cnt": 0,
-        "ACK Flag Cnt": 0,
-        "URG Flag Cnt": 0,
-        "CWE Flag Count": 0,
-        "ECE Flag Cnt": 0,
-        "Down/Up Ratio": 0,
-        "Pkt Size Avg": len(packet),
-        "Fwd Seg Size Avg": len(packet) if direction == "forward" else 0,
-        "Bwd Seg Size Avg": len(packet) if direction == "backward" else 0,
-        "Fwd Byts/b Avg": len(packet) if direction == "forward" else 0,
-        "Fwd Pkts/b Avg": 1 if direction == "forward" else 0,
-        "Fwd Blk Rate Avg": 0,
-        "Bwd Byts/b Avg": len(packet) if direction == "backward" else 0,
-        "Bwd Pkts/b Avg": 1 if direction == "backward" else 0,
-        "Bwd Blk Rate Avg": 0,
-        "Subflow Fwd Pkts": 1 if direction == "forward" else 0,
-        "Subflow Fwd Byts": len(packet) if direction == "forward" else 0,
-        "Subflow Bwd Pkts": 1 if direction == "backward" else 0,
-        "Subflow Bwd Byts": len(packet) if direction == "backward" else 0,
-        "Init Fwd Win Byts": 65535,
-        "Init Bwd Win Byts": 65535,
-        "Fwd Act Data Pkts": 1 if direction == "forward" else 0,
-        "Fwd Seg Size Min": len(packet) if direction == "forward" else 0,
-        "Active Mean": 0,
-        "Active Std": 0,
-        "Active Max": 0,
-        "Active Min": 0,
-        "Idle Mean": 0,
-        "Idle Std": 0,
-        "Idle Max": 0,
-        "Idle Min": 0,
-    }
-
-    # Extract TCP flags if present
-    if TCP in packet:
-        tcp = packet[TCP]
-        if tcp.flags.S:
-            features["SYN Flag Cnt"] = 1
-        if tcp.flags.F:
-            features["FIN Flag Cnt"] = 1
-        if tcp.flags.R:
-            features["RST Flag Cnt"] = 1
-        if tcp.flags.A:
-            features["ACK Flag Cnt"] = 1
-        if tcp.flags.P:
-            features["PSH Flag Cnt"] = 1
-        if tcp.flags.U:
-            features["URG Flag Cnt"] = 1
-        if tcp.flags.E:
-            features["ECE Flag Cnt"] = 1
-
-        # Add TCP header length
-        features["Fwd Header Len"] = 20 + 20  # IP + TCP
-        features["Bwd Header Len"] = 20 + 20
-
-    # ICMP detection (attack signature)
-    if ICMP in packet:
-        features["SYN Flag Cnt"] = 100  # Fake high count for ICMP floods
-        features["Flow Pkts/s"] = 1000
-
-    # UDP detection
-    if UDP in packet:
-        features["PSH Flag Cnt"] = 100  # Fake high count for UDP floods
-        features["Flow Pkts/s"] = 500
-
-    return features
-
-
-def packet_callback(packet):
-    """Process each captured packet."""
-    if not IP in packet:
+def consume_packet(packet, timestamp: float | None = None) -> None:
+    if IP not in packet:
         return
-
-    ip = packet[IP]
-    src_ip = ip.src
-    dst_ip = ip.dst
-
-    # Create flow key
-    flow_key = (src_ip, dst_ip)
-
+    protocol, source, destination = packet_tuple(packet)
+    key = canonical_key(protocol, source, destination)
+    timestamp = float(packet.time if timestamp is None else timestamp)
     with flow_lock:
-        # Update or create flow
-        if flow_key not in flows:
-            flows[flow_key] = {
-                "first_seen": datetime.now(timezone.utc).isoformat(),
-                "packet_count": 0,
-                "bytes": 0,
-                "features": extract_flow_features(packet, "forward")
-            }
-        else:
-            flows[flow_key]["packet_count"] += 1
-            flows[flow_key]["bytes"] += len(packet)
-
-            # Aggregate features
-            new_features = extract_flow_features(packet, "forward")
-            for key in new_features:
-                if isinstance(new_features[key], (int, float)):
-                    flows[flow_key]["features"][key] += new_features[key]
+        flow = flows.get(key)
+        if flow is None:
+            flow = Flow(protocol, source, source[0], timestamp, timestamp)
+            flows[key] = flow
+        flow.add(packet, source, timestamp)
 
 
-def flush_flows_to_db():
-    """Write captured flows to SQLite."""
+def packet_callback(packet) -> None:
+    consume_packet(packet)
+
+
+def flush_flows_to_db() -> int:
     with flow_lock:
-        if not flows:
-            return 0
-
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-
-        now = datetime.now(timezone.utc).isoformat()
-        inserted = 0
-
-        for (src_ip, dst_ip), flow_data in list(flows.items()):
-            try:
-                # Prepare features
-                features = flow_data["features"]
-                data_json = json.dumps(features)
-
-                # Mark all flows as NORMAL - let CNN model decide
-                # (Heuristic detection was too aggressive, caught normal traffic)
-                label = "NORMAL"
-
-                c.execute(
-                    "INSERT INTO logs (timestamp, source_ip, source_host, label, data) VALUES (?, ?, ?, ?, ?)",
-                    (now, src_ip, src_ip, label, data_json)
-                )
-                inserted += 1
-            except Exception as e:
-                log.error(f"Error inserting flow {src_ip}->{dst_ip}: {e}")
-
-        conn.commit()
-        conn.close()
-
-        # Clear flows
+        pending = list(flows.values())
         flows.clear()
-
-        return inserted
-
-
-def start_capture():
-    """Start packet capture loop."""
-    log.info("Starting packet capture...")
-    log.info(f"Interface: {INTERFACE or 'auto-detect'}")
-    log.info(f"Batch size: {PACKET_COUNT}")
-
-    # Flush flows periodically
-    def flush_worker():
-        while True:
-            time.sleep(5)  # Flush every 5 seconds
-            count = flush_flows_to_db()
-            if count > 0:
-                log.info(f"Flushed {count} flows to SQLite")
-
-    flush_thread = threading.Thread(target=flush_worker, daemon=True)
-    flush_thread.start()
-
-    # Start packet sniffing
-    try:
-        sniff(
-            prn=packet_callback,
-            iface=INTERFACE,  # None = auto-detect
-            store=False,
-            filter="ip",  # Only IP packets
+    if not pending:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    import json
+    with connect(DB_PATH) as conn:
+        conn.executemany(
+            "INSERT INTO logs (timestamp, source_ip, source_host, label, data) VALUES (?, ?, ?, ?, ?)",
+            [(now, flow.source_ip, flow.source_ip, "UNLABELLED", json.dumps(flow.features()))
+             for flow in pending],
         )
-    except PermissionError:
-        log.error("ERROR: Packet capture requires root privileges")
-        log.error("Run with: sudo python -m inference.packet_capture")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        log.info("Packet capture stopped")
-        # Final flush
+    return len(pending)
+
+
+def _flush_worker() -> None:
+    while True:
+        time.sleep(FLOW_WINDOW)
         count = flush_flows_to_db()
-        log.info(f"Final flush: {count} flows")
+        if count:
+            log.info("Flushed %d bidirectional flows", count)
+
+
+def start_capture() -> None:
+    init_schema(DB_PATH)
+    threading.Thread(target=_flush_worker, daemon=True).start()
+    log.info("Capturing IP traffic on %s with %.1fs windows", INTERFACE or "all interfaces", FLOW_WINDOW)
+    try:
+        sniff(prn=packet_callback, iface=INTERFACE, store=False, filter="ip")
+    finally:
+        flush_flows_to_db()
 
 
 if __name__ == "__main__":
-    init_sqlite()
     start_capture()

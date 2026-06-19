@@ -58,7 +58,7 @@ EPOCHS      = 20
 BATCH_SIZE  = 128
 PATIENCE    = 4          # early stopping patience
 LR          = 1e-3       # initial learning rate
-THRESHOLD   = 0.5        # sigmoid decision threshold
+THRESHOLD   = float(os.getenv("THRESHOLD", "0.50"))
 
 
 def load_processed():
@@ -290,7 +290,7 @@ def plot_training(history):
         log.info("matplotlib not installed — skipping training curve plot")
 
 
-if __name__ == "__main__":
+def run_pipeline():
     log.info("=" * 55)
     log.info("  OneMoney IDS — CNN Training")
     log.info("=" * 55)
@@ -318,3 +318,8 @@ if __name__ == "__main__":
     log.info("=" * 55)
     log.info("  Done. Model ready at model/onemoney_cnn.h5")
     log.info("=" * 55)
+    return model, history
+
+
+if __name__ == "__main__":
+    run_pipeline()

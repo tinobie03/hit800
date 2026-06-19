@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r inference/requirements.txt
 # Copy model artefacts and feature metadata
 COPY model/       /app/model/
 COPY data/processed/feature_names.txt /app/data/processed/feature_names.txt
+COPY ids_core/    /app/ids_core/
 
 # Copy inference package
 COPY inference/   /app/inference/
@@ -24,6 +25,6 @@ ENV PYTHONUNBUFFERED=1 \
     FEAT_FILE=data/processed/feature_names.txt \
     POLL_INTERVAL=10 \
     BATCH_SIZE=500 \
-    THRESHOLD=0.40
+    THRESHOLD=0.50
 
 CMD ["python", "-m", "inference.service"]

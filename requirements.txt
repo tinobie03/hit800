@@ -6,18 +6,11 @@
 # Core data science
 numpy==1.26.4
 pandas==2.2.2
-scikit-learn==1.4.2
-imbalanced-learn==0.12.2       # SMOTE for class imbalance
+scikit-learn==1.8.0
 
 # Deep learning (CNN model)
 tensorflow==2.16.1
-keras==3.3.3
-
-# ELK / Elasticsearch client
-elasticsearch==8.13.0
-
-# Database
-pymongo==4.7.2
+keras==3.13.2
 
 # API backend
 fastapi==0.111.0
@@ -33,3 +26,4 @@ tqdm==4.66.4                   # Progress bars
 schedule==1.2.2                # Inference loop scheduling
 requests==2.32.2
 pyyaml==6.0.1
+scapy==2.5.0

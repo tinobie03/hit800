@@ -118,7 +118,7 @@ export default function App() {
               <div className="flex items-center gap-4">
                 <span>OneMoney IDS/IPS · CNN 1D · 76 CICFlowMeter Features</span>
                 <span className="text-ids-border">|</span>
-                <span>Threshold: <span className="text-ids-warn font-mono">0.40</span></span>
+                <span>Threshold: <span className="text-ids-warn font-mono">{health?.threshold ?? 0.50}</span></span>
                 <span className="text-ids-border">|</span>
                 <span>Poll: <span className="font-mono">10s</span></span>
               </div>
