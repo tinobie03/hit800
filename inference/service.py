@@ -136,12 +136,27 @@ def restore_persisted_blocks() -> None:
         log.info("Automatic blocking disabled; persisted blocks were not restored")
         return
     failures = []
+    skipped = []
     for ip in sorted(_blocked_cache):
         if is_protected(ip):
             log.warning("Not restoring protected address %s", ip)
             continue
+        # A persisted block must never override a now-whitelisted IP. Deactivate
+        # it so it stops resurrecting on every restart and never re-locks us out.
+        if is_whitelisted(ip):
+            skipped.append(ip)
+            continue
         if not apply_firewall_block(ip):
             failures.append(ip)
+    if skipped:
+        with connect(DB_PATH) as conn:
+            conn.executemany(
+                "UPDATE blocked_ips SET active = 0 WHERE ip = ?",
+                [(ip,) for ip in skipped],
+            )
+        for ip in skipped:
+            _blocked_cache.discard(ip)
+        log.warning("Skipped restoring %d whitelisted blocks: %s", len(skipped), skipped)
     if failures:
         log.error("Could not restore %d persisted firewall blocks: %s", len(failures), failures)
 
