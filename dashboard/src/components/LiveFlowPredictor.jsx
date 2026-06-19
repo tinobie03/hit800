@@ -196,7 +196,7 @@ export default function LiveFlowPredictor() {
 
   // Clear database
   const handleClearDatabase = async () => {
-    if (!window.confirm('⚠️  Clear all alerts and logs from the database? This cannot be undone.')) {
+    if (!window.confirm('⚠️  Clear ALL alerts, logs, and blocked IPs? This cannot be undone.')) {
       return
     }
 

@@ -435,18 +435,32 @@ def unblock_ip(ip: str):
 @app.post("/api/clear-db")
 def clear_database():
     """
-    Clear all alerts and logs from the database.
+    Clear all alerts, logs, and blocked IPs from the database.
+    Also removes all iptables rules for blocked IPs.
     Used for testing - allows clean slate without restarting services.
     """
     try:
         conn = get_db()
         c = conn.cursor()
+
+        # Get all active blocked IPs and remove them from iptables
+        c.execute("SELECT ip FROM blocked_ips WHERE active = 1")
+        blocked_ips = [row[0] for row in c.fetchall()]
+        for ip in blocked_ips:
+            _remove_block(ip)
+
+        # Clear all tables
         c.execute("DELETE FROM alerts")
         c.execute("DELETE FROM logs")
+        c.execute("DELETE FROM blocked_ips")
         conn.commit()
         conn.close()
-        log.info("Database cleared: all alerts and logs deleted")
-        return {"status": "cleared", "message": "All alerts and logs deleted from database"}
+
+        log.info(f"Database cleared: alerts, logs, and {len(blocked_ips)} blocked IPs deleted")
+        return {
+            "status": "cleared",
+            "message": f"All alerts, logs, and {len(blocked_ips)} blocked IPs deleted from database"
+        }
     except Exception as exc:
         log.error(f"Clear database error: {exc}")
         raise HTTPException(status_code=500, detail="Failed to clear database")
