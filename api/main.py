@@ -247,17 +247,25 @@ def get_alerts(
         )
         rows = c.fetchall()
 
+        # Map columns by name so ordering stays correct as the schema evolves.
+        col_index = {desc[0]: i for i, desc in enumerate(c.description)}
+
+        def field(row, name, default=None):
+            idx = col_index.get(name)
+            return row[idx] if idx is not None else default
+
         alerts = []
         for row in rows:
             alerts.append({
-                "timestamp": row[1],
-                "source_host": row[2],
-                "source_ip": row[3],
-                "prediction": row[4],
-                "severity": row[5],
-                "attack_prob": row[6],
-                "blocked": bool(row[7]),
-                "indexed_at": row[8],
+                "timestamp":   field(row, "timestamp"),
+                "source_host": field(row, "source_host"),
+                "source_ip":   field(row, "source_ip"),
+                "prediction":  field(row, "prediction"),
+                "severity":    field(row, "severity"),
+                "attack_prob": field(row, "attack_prob"),
+                "blocked":     bool(field(row, "blocked", 0)),
+                "indexed_at":  field(row, "indexed_at"),
+                "attack_type": field(row, "attack_type", "UNKNOWN"),
             })
 
         conn.close()
@@ -303,24 +311,39 @@ def get_stats(hours: int = Query(24, ge=1, le=720)):
         )
         top_attackers = [{"ip": row[0], "count": row[1]} for row in c.fetchall()]
 
+        # Alerts grouped per hour for the time-series chart
+        c.execute(
+            """SELECT strftime('%Y-%m-%dT%H:00:00', indexed_at) AS hour, COUNT(*) AS count
+               FROM alerts
+               WHERE indexed_at >= ? AND prediction = 'ATTACK'
+               GROUP BY hour
+               ORDER BY hour ASC""",
+            (since,)
+        )
+        alerts_per_hour = [{"hour": row[0], "count": row[1]} for row in c.fetchall()]
+
         conn.close()
 
         return {
             "period_hours":    hours,
+            "window_hours":    hours,
             "total_alerts":    total_attacks,
             "blocked_ips":     blocked_count,
             "severity_counts": severity_counts,
             "top_attackers":   top_attackers,
+            "alerts_per_hour": alerts_per_hour,
             "threshold":       THRESHOLD,
         }
     except Exception as exc:
         log.error(f"SQLite stats error: {exc}")
         return {
             "period_hours":    hours,
+            "window_hours":    hours,
             "total_alerts":    0,
             "blocked_ips":     0,
             "severity_counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
             "top_attackers":   [],
+            "alerts_per_hour": [],
             "threshold":       THRESHOLD,
         }
 

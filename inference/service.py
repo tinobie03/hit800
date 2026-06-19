@@ -171,8 +171,30 @@ def classify(model, values: np.ndarray):
     return (probabilities >= THRESHOLD).astype(int), probabilities
 
 
+def current_attack_label() -> str:
+    """Return the attack_type of the in-progress (or just-finished) simulation.
+
+    Labels alerts at creation time so they are tagged correctly despite the
+    capture/inference latency. Returns 'UNKNOWN' when no simulation is active.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with connect(DB_PATH) as conn:
+            row = conn.execute(
+                """SELECT attack_type FROM attack_runs
+                   WHERE start_time <= ?
+                     AND (end_time IS NULL OR ? <= datetime(end_time, '+30 seconds'))
+                   ORDER BY id DESC LIMIT 1""",
+                (now, now),
+            ).fetchone()
+        return row[0] if row and row[0] else "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+
 def build_attack_alerts(logs, predictions, probabilities) -> list[dict]:
     now = datetime.now(timezone.utc).isoformat()
+    label = current_attack_label()
     alerts = []
     for log_doc, prediction, probability in zip(logs, predictions, probabilities):
         ip = log_doc.get("source_ip") or "unknown"
@@ -190,7 +212,7 @@ def build_attack_alerts(logs, predictions, probabilities) -> list[dict]:
             "blocked": 0,
             "indexed_at": now,
             "raw_log": json.dumps(log_doc),
-            "attack_type": "UNKNOWN",
+            "attack_type": label,
         })
     return alerts
 

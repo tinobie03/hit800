@@ -34,8 +34,11 @@ services:
       - POLL_INTERVAL=10
       - BATCH_SIZE=500
       - THRESHOLD=0.50
-      - AUTO_BLOCK=false
-      - PROTECTED_NETWORKS=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      # Enable automatic firewall blocking of detected attackers
+      - AUTO_BLOCK=true
+      # Only loopback is auto-protected. Protect your gateway + own host via the
+      # dashboard whitelist so the attacker (172.20.10.x) can still be blocked.
+      - PROTECTED_NETWORKS=127.0.0.0/8
       - MODEL_PATH=model/onemoney_cnn.h5
       - SCALER_PATH=model/scaler.pkl
     volumes:
