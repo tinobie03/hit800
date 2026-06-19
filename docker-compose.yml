@@ -60,6 +60,8 @@ services:
       # Only loopback is auto-protected. Protect your gateway + own host via the
       # dashboard whitelist so the attacker (172.20.10.x) can still be blocked.
       - PROTECTED_NETWORKS=127.0.0.0/8
+      # Pre-seeded whitelist on startup (comma-separated "ip:reason" pairs)
+      - WHITELIST_IPS=172.20.10.1:gateway,172.20.10.2:protected target,172.20.10.3:management,127.0.0.1:loopback
       - MODEL_PATH=model/onemoney_cnn.h5
       - SCALER_PATH=model/scaler.pkl
     volumes:
@@ -78,6 +80,8 @@ services:
     environment:
       - DB_PATH=/data/ids.db
       - THRESHOLD=0.50
+      # Pre-seeded whitelist on startup (comma-separated "ip:reason" pairs)
+      - WHITELIST_IPS=172.20.10.1:gateway,172.20.10.2:protected target,172.20.10.3:management,127.0.0.1:loopback
       - MODEL_PATH=model/onemoney_cnn.h5
       - SCALER_PATH=model/scaler.pkl
     volumes:

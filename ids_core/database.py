@@ -1,7 +1,31 @@
 """SQLite schema and connection helpers."""
 
+import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def seed_whitelist_from_env(conn: sqlite3.Connection) -> None:
+    """Parse WHITELIST_IPS from environment and seed whitelist table."""
+    whitelist_str = os.getenv("WHITELIST_IPS", "")
+    if not whitelist_str:
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    for entry in whitelist_str.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split(":", 1)
+        ip = parts[0].strip()
+        reason = parts[1].strip() if len(parts) > 1 else "pre-seeded"
+
+        conn.execute(
+            "INSERT OR IGNORE INTO whitelist (ip, reason, added_at, active) VALUES (?, ?, ?, 1)",
+            (ip, reason, now)
+        )
+    conn.commit()
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -109,3 +133,4 @@ def init_schema(db_path: str) -> None:
             "ON alerts(source_log_id) WHERE source_log_id IS NOT NULL"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_indexed_at ON alerts(indexed_at)")
+        seed_whitelist_from_env(conn)
