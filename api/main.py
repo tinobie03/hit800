@@ -464,3 +464,113 @@ def clear_database():
     except Exception as exc:
         log.error(f"Clear database error: {exc}")
         raise HTTPException(status_code=500, detail="Failed to clear database")
+
+
+class AttackStartRequest(BaseModel):
+    attack_type: str = Field(..., description="e.g., SYN_FLOOD, SSH_BRUTE, UDP_FLOOD, ICMP_FLOOD, PORT_SCAN, UNKNOWN")
+    target_ip: str = Field(..., description="Target IP address")
+    source_ip: Optional[str] = Field(None, description="Attacker IP (optional)")
+    intensity: str = Field("normal", description="light, normal, or heavy")
+
+
+@app.post("/api/attack-start")
+def log_attack_start(req: AttackStartRequest):
+    """
+    Log when an attack simulation starts.
+    Used to automatically label alerts with attack type.
+    """
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Create attack_runs table if it doesn't exist
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS attack_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attack_type TEXT,
+                target_ip TEXT,
+                source_ip TEXT,
+                intensity TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                status TEXT DEFAULT 'running'
+            )
+        """)
+
+        # Insert attack start record
+        c.execute(
+            "INSERT INTO attack_runs (attack_type, target_ip, source_ip, intensity, start_time, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (req.attack_type, req.target_ip, req.source_ip or "0.0.0.0", req.intensity, now, "running")
+        )
+        attack_id = c.lastrowid
+        conn.commit()
+        conn.close()
+
+        log.info(f"Attack started: ID={attack_id} Type={req.attack_type} Target={req.target_ip} Intensity={req.intensity}")
+        return {
+            "status": "recorded",
+            "attack_id": attack_id,
+            "message": f"Attack {req.attack_type} started"
+        }
+    except Exception as exc:
+        log.error(f"Attack start logging error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to log attack start")
+
+
+class AttackEndRequest(BaseModel):
+    attack_id: int = Field(..., description="ID returned from attack-start")
+    packets_sent: int = Field(0, description="Number of packets sent")
+
+
+@app.post("/api/attack-end")
+def log_attack_end(req: AttackEndRequest):
+    """
+    Log when an attack simulation ends.
+    Automatically labels all alerts in the time window with the attack type.
+    """
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Get attack details
+        c.execute("SELECT attack_type, start_time, target_ip, source_ip FROM attack_runs WHERE id = ?", (req.attack_id,))
+        attack = c.fetchone()
+        if not attack:
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"Attack ID {req.attack_id} not found")
+
+        attack_type, start_time, target_ip, source_ip = attack
+
+        # Mark attack as ended
+        c.execute(
+            "UPDATE attack_runs SET end_time = ?, status = ? WHERE id = ?",
+            (now, "completed", req.attack_id)
+        )
+
+        # Auto-label alerts within time window
+        # Alerts within 30 seconds after attack start are labeled with this attack type
+        c.execute("""
+            UPDATE alerts
+            SET attack_type = ?
+            WHERE indexed_at BETWEEN ? AND datetime(?, '+30 seconds')
+            AND (source_ip = ? OR source_ip LIKE ? || '%')
+        """, (attack_type, start_time, start_time, source_ip, source_ip.rsplit('.', 1)[0]))
+
+        labeled_count = c.rowcount
+        conn.commit()
+        conn.close()
+
+        log.info(f"Attack ended: ID={req.attack_id} Type={attack_type} Labeled={labeled_count} alerts Packets={req.packets_sent}")
+        return {
+            "status": "recorded",
+            "attack_id": req.attack_id,
+            "alerts_labeled": labeled_count,
+            "message": f"Attack {attack_type} ended, {labeled_count} alerts labeled"
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error(f"Attack end logging error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to log attack end")

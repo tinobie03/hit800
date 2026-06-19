@@ -1,4 +1,5 @@
 import React from 'react'
+import { fetchAlerts } from '../utils/api.js'
 
 function fmtTime(ts) {
   if (!ts) return '—'
@@ -64,27 +65,42 @@ export default function AlertsTable({ alerts }) {
   const rows = alerts?.alerts ?? (Array.isArray(alerts) ? alerts : [])
   const total = alerts?.total ?? rows.length
 
-  function exportCSV() {
-    const headers = ['Time','Source IP','Dest IP','Attack Prob','Confidence','Type','Blocked']
-    const csvRows = [headers.join(',')]
-    rows.forEach(row => {
-      csvRows.push([
-        row.timestamp ?? '',
-        row.src_ip ?? '',
-        row.dst_ip ?? '',
-        row.attack_prob ?? '',
-        row.confidence ?? '',
-        row.attack_type ?? row.traffic_type ?? 'ATTACK',
-        row.blocked ? 'true' : 'false',
-      ].join(','))
-    })
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `onemoney_ids_alerts_${new Date().toISOString().slice(0,10)}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+  async function exportCSV() {
+    try {
+      // Fetch ALL alerts (no limit)
+      const data = await fetchAlerts(500, 24)  // 500 limit, last 24 hours
+      const allRows = data.alerts ?? []
+
+      const headers = ['Time','Source IP','Attack Type','Attack Probability','Severity','Prediction','Blocked','Indexed At']
+      const csvRows = [headers.join(',')]
+
+      allRows.forEach(row => {
+        csvRows.push([
+          `"${row.timestamp ?? ''}"`,
+          `"${row.source_ip ?? row.src_ip ?? ''}"`,
+          `"${row.attack_type ?? row.prediction ?? 'UNKNOWN'}"`,
+          (row.attack_prob ?? 0).toFixed(4),
+          row.severity ?? 'NONE',
+          row.prediction ?? 'BENIGN',
+          row.blocked ? 'YES' : 'NO',
+          `"${row.indexed_at ?? ''}"`,
+        ].join(','))
+      })
+
+      const csv = csvRows.join('\n')
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `onemoney_ids_alerts_${total}_${new Date().toISOString().slice(0,10)}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+
+      // Show confirmation
+      alert(`✓ Exported ${allRows.length} total alerts`)
+    } catch (err) {
+      alert(`✗ Export failed: ${err.message}`)
+    }
   }
 
   if (!rows.length) {
