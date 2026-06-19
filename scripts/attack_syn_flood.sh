@@ -19,7 +19,9 @@ if ! command -v hping3 &> /dev/null; then
 fi
 
 echo "[*] Flooding port 80 with SYN packets for ${DURATION} seconds..."
-sudo hping3 -S --flood -p 80 $TARGET_IP &
+# Use -i u1000 (send 1 packet every 1000 microseconds = 1000 pps) instead of --flood
+# --flood is unlimited and can crash the target
+sudo hping3 -S -i u10000 -p 80 $TARGET_IP &
 HPING_PID=$!
 
 sleep $DURATION

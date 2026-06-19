@@ -19,7 +19,8 @@ if ! command -v hping3 &> /dev/null; then
 fi
 
 echo "[*] Flooding $TARGET_IP with ICMP packets for ${DURATION} seconds..."
-sudo hping3 -1 --flood $TARGET_IP &
+# Use -i u10000 instead of --flood to avoid overwhelming the target
+sudo hping3 -1 -i u10000 $TARGET_IP &
 HPING_PID=$!
 
 sleep $DURATION

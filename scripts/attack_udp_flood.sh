@@ -19,7 +19,8 @@ if ! command -v hping3 &> /dev/null; then
 fi
 
 echo "[*] Flooding port 53 with UDP packets for ${DURATION} seconds..."
-sudo hping3 -2 --flood -p 53 $TARGET_IP &
+# Use -i u10000 instead of --flood to avoid overwhelming the target
+sudo hping3 -2 -i u10000 -p 53 $TARGET_IP &
 HPING_PID=$!
 
 sleep $DURATION
