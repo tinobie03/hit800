@@ -61,13 +61,22 @@ RANDOM_SEED = 42
 
 
 def load_data() -> pd.DataFrame:
-    log.info(f"Loading dataset: {DATASET_FILE}")
+    log.info(f"Loading base dataset: {DATASET_FILE}")
     if not DATASET_FILE.exists():
         log.error(f"Dataset not found at {DATASET_FILE}")
         log.error("Place OneMoney_Training_v3_10k.csv in data/raw/ and retry.")
         sys.exit(1)
 
-    df = pd.read_csv(DATASET_FILE)
+    files = [DATASET_FILE, *sorted(RAW_DIR.glob("Live_*.csv"))]
+    frames = []
+    for path in files:
+        frame = pd.read_csv(path)
+        missing = [column for column in [*FEATURES, "Label"] if column not in frame.columns]
+        if missing:
+            raise ValueError(f"{path} is missing required columns: {missing}")
+        frames.append(frame[[*FEATURES, "Label"]])
+        log.info("  %s: %,d rows", path.name, len(frame))
+    df = pd.concat(frames, ignore_index=True)
     log.info(f"Loaded {len(df):,} rows x {len(df.columns)} columns")
 
     label_counts = df["Label"].value_counts()

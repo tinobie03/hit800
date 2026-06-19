@@ -21,7 +21,10 @@ class FlowAggregationTests(unittest.TestCase):
         packet_capture.consume_packet(syn_ack, 1.1)
 
         self.assertEqual(len(packet_capture.flows), 1)
-        values = next(iter(packet_capture.flows.values())).features()
+        flow = next(iter(packet_capture.flows.values()))
+        self.assertEqual(flow.source_ip, "10.0.0.1")
+        self.assertEqual(flow.destination_ip, "10.0.0.2")
+        values = flow.features()
         self.assertEqual(list(values), FEATURES)
         self.assertEqual(values["Tot Fwd Pkts"], 1)
         self.assertEqual(values["Tot Bwd Pkts"], 1)
@@ -41,4 +44,3 @@ class FlowAggregationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

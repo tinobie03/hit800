@@ -53,6 +53,10 @@ services:
       - THRESHOLD=0.50
       # Enable automatic firewall blocking of detected attackers
       - AUTO_BLOCK=true
+      # Escalate only after repeated high-confidence detections from one IP.
+      - BLOCK_MIN_ALERTS=3
+      - BLOCK_WINDOW_SECONDS=60
+      - BLOCK_MIN_SCORE=0.80
       # Only loopback is auto-protected. Protect your gateway + own host via the
       # dashboard whitelist so the attacker (172.20.10.x) can still be blocked.
       - PROTECTED_NETWORKS=127.0.0.0/8

@@ -106,6 +106,7 @@ class Flow:
     protocol: int
     forward_endpoint: str  # IP of the side that opened the flow
     source_ip: str
+    destination_ip: str
     started: float
     last_seen: float
     forward: Direction = field(default_factory=Direction)
@@ -226,7 +227,7 @@ def consume_packet(packet, timestamp: float | None = None) -> None:
     with flow_lock:
         flow = flows.get(key)
         if flow is None:
-            flow = Flow(protocol, source[0], source[0], timestamp, timestamp)
+            flow = Flow(protocol, source[0], source[0], destination[0], timestamp, timestamp)
             flows[key] = flow
         flow.add(packet, source, timestamp)
 
@@ -253,8 +254,8 @@ def flush_flows_to_db() -> int:
 
     with connect(DB_PATH) as conn:
         conn.executemany(
-            "INSERT INTO logs (timestamp, source_ip, source_host, label, data) VALUES (?, ?, ?, ?, ?)",
-            [(flow_timestamp(flow), flow.source_ip, flow.source_ip, "UNLABELLED", json.dumps(flow.features()))
+            "INSERT INTO logs (timestamp, source_ip, destination_ip, source_host, label, data) VALUES (?, ?, ?, ?, ?, ?)",
+            [(flow_timestamp(flow), flow.source_ip, flow.destination_ip, flow.source_ip, "UNLABELLED", json.dumps(flow.features()))
              for flow in pending],
         )
     return len(pending)

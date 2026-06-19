@@ -37,14 +37,18 @@ function ProbBar({ value }) {
   )
 }
 
-function BlockedBadge({ blocked }) {
-  return blocked ? (
+function StatusBadge({ currentlyBlocked, blockedAtDetection }) {
+  return currentlyBlocked ? (
     <span className="badge bg-ids-danger/15 text-ids-danger border border-ids-danger/30">
       Blocked
     </span>
+  ) : blockedAtDetection ? (
+    <span className="badge bg-ids-orange/10 text-ids-orange border border-ids-orange/20">
+      Unblocked
+    </span>
   ) : (
-    <span className="badge bg-ids-safe/10 text-ids-safe border border-ids-safe/20">
-      Live
+    <span className="badge bg-ids-bg text-ids-sub border border-ids-border">
+      Detected
     </span>
   )
 }
@@ -67,9 +71,18 @@ export default function AlertsTable({ alerts }) {
 
   async function exportCSV() {
     try {
-      // Fetch ALL alerts (no limit)
-      const data = await fetchAlerts(500, 24)  // 500 limit, last 24 hours
-      const allRows = data.alerts ?? []
+      // Fetch every page; the API deliberately caps a single response at 500.
+      const allRows = []
+      let skip = 0
+      let available = total
+      do {
+        const page = await fetchAlerts(500, 24, skip)
+        const pageRows = page.alerts ?? []
+        allRows.push(...pageRows)
+        available = page.total ?? allRows.length
+        skip += pageRows.length
+        if (pageRows.length === 0) break
+      } while (allRows.length < available)
 
       const headers = ['Time','Source IP','Attack Type','Attack Probability','Severity','Prediction','Blocked','Indexed At']
       const csvRows = [headers.join(',')]
@@ -135,7 +148,7 @@ export default function AlertsTable({ alerts }) {
         <table className="w-full text-sm border-collapse">
           <thead>
             <tr className="border-b border-ids-border">
-              {['Time', 'Source IP', 'Dest IP', 'Attack Prob', 'Confidence', 'Type', 'Status'].map(h => (
+              {['Time', 'Source IP', 'Dest IP', 'Model Score', 'Type', 'Status'].map(h => (
                 <th
                   key={h}
                   className="pb-2 pr-4 text-left text-[10px] font-semibold uppercase tracking-widest text-ids-muted whitespace-nowrap"
@@ -148,12 +161,12 @@ export default function AlertsTable({ alerts }) {
           <tbody>
             {rows.slice(0, 20).map((row, i) => {
               const attackProb = row.attack_prob ?? row.confidence ?? 0
-              const isBlocked  = row.blocked === true
+              const currentlyBlocked = row.currently_blocked === true
               return (
                 <tr
                   key={i}
                   className={`border-b border-ids-border/50 transition-colors ${
-                    isBlocked
+                    currentlyBlocked
                       ? 'bg-ids-danger/5 hover:bg-ids-danger/10'
                       : 'hover:bg-ids-card2/60'
                   }`}
@@ -170,12 +183,6 @@ export default function AlertsTable({ alerts }) {
                   <td className="py-2.5 pr-4">
                     <ProbBar value={attackProb} />
                   </td>
-                  <td className="py-2.5 pr-4 text-xs text-ids-sub whitespace-nowrap">
-                    {row.confidence != null
-                      ? `${(row.confidence * 100).toFixed(1)}%`
-                      : `${(attackProb * 100).toFixed(1)}%`
-                    }
-                  </td>
                   <td className="py-2.5 pr-4">
                     {(() => {
                       const attackLabel = row.attack_type ?? row.traffic_type ?? row.prediction ?? 'ATTACK'
@@ -188,7 +195,7 @@ export default function AlertsTable({ alerts }) {
                     })()}
                   </td>
                   <td className="py-2.5">
-                    <BlockedBadge blocked={isBlocked} />
+                    <StatusBadge currentlyBlocked={currentlyBlocked} blockedAtDetection={row.blocked === true} />
                   </td>
                 </tr>
               )

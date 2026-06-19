@@ -44,10 +44,16 @@ export async function fetchStats(hours = 24) {
   return request(`/api/stats?hours=${hours}`)
 }
 
-export async function fetchAlerts(limit = 20, hours = 24) {
-  const data = await request(`/api/alerts?limit=${limit}&hours=${hours}`)
+export async function fetchAlerts(limit = 20, hours = 24, skip = 0) {
+  const data = await request(`/api/alerts?limit=${limit}&hours=${hours}&skip=${skip}`)
   // Normalise: API may return list or { total, alerts: [] }
   if (Array.isArray(data)) return { total: data.length, alerts: data }
+  return data
+}
+
+export async function fetchEvents(limit = 20, hours = 24, skip = 0) {
+  const data = await request(`/api/events?limit=${limit}&hours=${hours}&skip=${skip}`)
+  if (Array.isArray(data)) return { total: data.length, events: data }
   return data
 }
 

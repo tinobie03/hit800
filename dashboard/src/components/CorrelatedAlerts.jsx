@@ -58,7 +58,7 @@ export default function CorrelatedAlerts() {
 
       {rows.length === 0 ? (
         <div className="h-24 flex items-center justify-center text-ids-muted text-sm">
-          No correlated data yet — run an SSH brute-force + a network attack.
+          No confirmed pair yet — run a tracked SSH brute-force so both the network and auth-log sources see the same IP.
         </div>
       ) : (
         <div className="overflow-x-auto">

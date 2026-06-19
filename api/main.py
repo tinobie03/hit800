@@ -227,23 +227,27 @@ def get_alerts(
         c = conn.cursor()
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
-        where_clauses = ["indexed_at >= ?", "prediction = 'ATTACK'"]
+        where_clauses = ["a.indexed_at >= ?", "a.prediction = 'ATTACK'"]
         params = [since]
 
         if severity:
-            where_clauses.append("severity = ?")
+            where_clauses.append("a.severity = ?")
             params.append(severity.upper())
         if ip:
-            where_clauses.append("source_ip = ?")
+            where_clauses.append("a.source_ip = ?")
             params.append(ip)
 
         where_sql = " AND ".join(where_clauses)
 
-        c.execute(f"SELECT COUNT(*) as count FROM alerts WHERE {where_sql}", params)
+        c.execute(f"SELECT COUNT(*) as count FROM alerts a WHERE {where_sql}", params)
         total = c.fetchone()[0]
 
         c.execute(
-            f"SELECT * FROM alerts WHERE {where_sql} ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?",
+            f"""SELECT a.*,
+                       EXISTS(SELECT 1 FROM blocked_ips b
+                              WHERE b.ip = a.source_ip AND b.active = 1) AS currently_blocked
+                FROM alerts a WHERE {where_sql}
+                ORDER BY a.indexed_at DESC, a.id DESC LIMIT ? OFFSET ?""",
             params + [limit, skip]
         )
         rows = c.fetchall()
@@ -258,13 +262,16 @@ def get_alerts(
         alerts = []
         for row in rows:
             alerts.append({
+                "id":          field(row, "id"),
                 "timestamp":   field(row, "timestamp"),
                 "source_host": field(row, "source_host"),
                 "source_ip":   field(row, "source_ip"),
+                "destination_ip": field(row, "destination_ip"),
                 "prediction":  field(row, "prediction"),
                 "severity":    field(row, "severity"),
                 "attack_prob": field(row, "attack_prob"),
                 "blocked":     bool(field(row, "blocked", 0)),
+                "currently_blocked": bool(field(row, "currently_blocked", 0)),
                 "indexed_at":  field(row, "indexed_at"),
                 "attack_type": field(row, "attack_type", "UNKNOWN"),
             })
@@ -274,6 +281,47 @@ def get_alerts(
     except Exception as exc:
         log.error(f"SQLite query error: {exc}")
         return {"total": 0, "limit": limit, "skip": skip, "alerts": []}
+
+
+@app.get("/api/events")
+def get_events(
+    limit: int = Query(50, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+    hours: int = Query(24, ge=1, le=720),
+):
+    """Recent model classifications, including benign and attack traffic."""
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with get_db() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE indexed_at >= ?",
+                (since,),
+            ).fetchone()[0]
+            conn.row_factory = __import__("sqlite3").Row
+            rows = conn.execute(
+                """SELECT a.*,
+                          EXISTS(SELECT 1 FROM blocked_ips b
+                                 WHERE b.ip = a.source_ip AND b.active = 1) AS currently_blocked,
+                          EXISTS(SELECT 1 FROM whitelist w
+                                 WHERE w.ip = a.source_ip AND w.active = 1) AS whitelisted
+                   FROM alerts a
+                   WHERE a.indexed_at >= ?
+                   ORDER BY a.indexed_at DESC, a.id DESC
+                   LIMIT ? OFFSET ?""",
+                (since, limit, skip),
+            ).fetchall()
+        events = []
+        for row in rows:
+            item = dict(row)
+            item["blocked"] = bool(item.get("blocked"))
+            item["currently_blocked"] = bool(item.get("currently_blocked"))
+            item["whitelisted"] = bool(item.get("whitelisted"))
+            item.pop("raw_log", None)
+            events.append(item)
+        return {"total": total, "limit": limit, "skip": skip, "events": events}
+    except Exception as exc:
+        log.error("SQLite events query error: %s", exc)
+        return {"total": 0, "limit": limit, "skip": skip, "events": []}
 
 
 @app.get("/api/stats")
@@ -292,6 +340,16 @@ def get_stats(hours: int = Query(24, ge=1, le=720)):
             (since,)
         )
         total_attacks = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM alerts WHERE indexed_at >= ?", (since,))
+        total_evaluated = c.fetchone()[0]
+
+        c.execute(
+            """SELECT AVG(attack_prob), MAX(attack_prob)
+               FROM alerts WHERE indexed_at >= ? AND prediction = 'ATTACK'""",
+            (since,),
+        )
+        avg_attack_prob, max_attack_prob = c.fetchone()
 
         c.execute("SELECT COUNT(*) FROM blocked_ips WHERE active = 1")
         blocked_count = c.fetchone()[0]
@@ -329,7 +387,11 @@ def get_stats(hours: int = Query(24, ge=1, le=720)):
             "period_hours":    hours,
             "window_hours":    hours,
             "total_alerts":    total_attacks,
+            "total_evaluated": total_evaluated,
+            "total_benign":    total_evaluated - total_attacks,
             "blocked_ips":     blocked_count,
+            "avg_attack_prob": avg_attack_prob,
+            "max_attack_prob": max_attack_prob,
             "severity_counts": severity_counts,
             "top_attackers":   top_attackers,
             "alerts_per_hour": alerts_per_hour,
@@ -341,7 +403,11 @@ def get_stats(hours: int = Query(24, ge=1, le=720)):
             "period_hours":    hours,
             "window_hours":    hours,
             "total_alerts":    0,
+            "total_evaluated": 0,
+            "total_benign":    0,
             "blocked_ips":     0,
+            "avg_attack_prob": None,
+            "max_attack_prob": None,
             "severity_counts": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0},
             "top_attackers":   [],
             "alerts_per_hour": [],

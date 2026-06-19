@@ -5,7 +5,7 @@ import ipaddress
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import joblib
 import numpy as np
@@ -33,6 +33,9 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
 THRESHOLD = float(os.getenv("THRESHOLD", "0.50"))
 AUTO_BLOCK = os.getenv("AUTO_BLOCK", "false").lower() in {"1", "true", "yes"}
+BLOCK_MIN_ALERTS = int(os.getenv("BLOCK_MIN_ALERTS", "3"))
+BLOCK_WINDOW_SECONDS = int(os.getenv("BLOCK_WINDOW_SECONDS", "60"))
+BLOCK_MIN_SCORE = float(os.getenv("BLOCK_MIN_SCORE", "0.80"))
 PROTECTED_NETWORKS = tuple(
     ipaddress.ip_network(value.strip())
     for value in os.getenv(
@@ -115,6 +118,19 @@ def block_ip(ip: str, reason: str = "CNN inference") -> bool:
     return True
 
 
+def has_block_evidence(ip: str) -> bool:
+    """Require repeated high-scoring detections before firewall escalation."""
+    since = (datetime.now(timezone.utc) - timedelta(seconds=BLOCK_WINDOW_SECONDS)).isoformat()
+    with connect(DB_PATH) as conn:
+        count, max_score = conn.execute(
+            """SELECT COUNT(*), COALESCE(MAX(attack_prob), 0)
+               FROM alerts
+               WHERE source_ip = ? AND prediction = 'ATTACK' AND indexed_at >= ?""",
+            (ip, since),
+        ).fetchone()
+    return count >= BLOCK_MIN_ALERTS and float(max_score) >= BLOCK_MIN_SCORE
+
+
 def restore_persisted_blocks() -> None:
     if not AUTO_BLOCK:
         log.info("Automatic blocking disabled; persisted blocks were not restored")
@@ -172,51 +188,62 @@ def classify(model, values: np.ndarray):
     return (probabilities >= THRESHOLD).astype(int), probabilities
 
 
-def current_attack_run() -> tuple[str, bool]:
-    """Return (attack_type, no_block) for the in-progress/just-finished simulation.
+def current_attack_runs() -> dict[str, tuple[str, bool]]:
+    """Return active/recent tracked simulations keyed by attacker source IP.
 
     Labels alerts at creation time so they are tagged correctly despite the
-    capture/inference latency. Returns ('UNKNOWN', False) when none is active.
+    capture/inference latency. Source matching prevents a concurrent benign
+    client from inheriting the attacker's label or low-risk firewall policy.
     """
     now = datetime.now(timezone.utc).isoformat()
     try:
         with connect(DB_PATH) as conn:
-            row = conn.execute(
-                """SELECT attack_type, no_block FROM attack_runs
-                   WHERE start_time <= ?
-                     AND (end_time IS NULL OR ? <= datetime(end_time, '+30 seconds'))
-                   ORDER BY id DESC LIMIT 1""",
+            rows = conn.execute(
+                """SELECT source_ip, attack_type, no_block FROM attack_runs
+                   WHERE julianday(start_time) <= julianday(?)
+                     AND (end_time IS NULL OR julianday(?) <= julianday(end_time, '+30 seconds'))
+                   ORDER BY id""",
                 (now, now),
-            ).fetchone()
-        if row:
-            return (row[0] or "UNKNOWN"), bool(row[1])
+            ).fetchall()
+        return {
+            (row[0] or "0.0.0.0"): (row[1] or "UNKNOWN", bool(row[2]))
+            for row in rows
+        }
     except Exception:
-        pass
-    return "UNKNOWN", False
+        return {}
 
 
-def build_attack_alerts(logs, predictions, probabilities, label="UNKNOWN") -> list[dict]:
+def build_events(logs, predictions, probabilities, label="UNKNOWN") -> list[dict]:
     now = datetime.now(timezone.utc).isoformat()
-    alerts = []
+    events = []
     for log_doc, prediction, probability in zip(logs, predictions, probabilities):
         ip = log_doc.get("source_ip") or "unknown"
-        if prediction != 1 or is_whitelisted(ip):
-            continue
         probability = float(probability)
-        alerts.append({
+        is_attack = prediction == 1
+        if isinstance(label, dict):
+            event_label = label.get(ip, label.get("0.0.0.0", ("UNKNOWN", False)))[0]
+        else:
+            event_label = label
+        events.append({
             "source_log_id": log_doc["id"],
             "timestamp": log_doc.get("timestamp", now),
             "source_host": log_doc.get("source_host", "unknown"),
             "source_ip": ip,
-            "prediction": "ATTACK",
-            "severity": severity(probability),
+            "destination_ip": log_doc.get("destination_ip"),
+            "prediction": "ATTACK" if is_attack else "BENIGN",
+            "severity": severity(probability) if is_attack else "NONE",
             "attack_prob": round(probability, 4),
             "blocked": 0,
             "indexed_at": now,
             "raw_log": json.dumps(log_doc),
-            "attack_type": label,
+            "attack_type": event_label if is_attack else "NORMAL",
         })
-    return alerts
+    return events
+
+
+# Compatibility for callers/tests using the old name. It now intentionally
+# returns every classification so the live stream can include benign traffic.
+build_attack_alerts = build_events
 
 
 def commit_batch(alerts: list[dict], cursor: int) -> None:
@@ -224,11 +251,11 @@ def commit_batch(alerts: list[dict], cursor: int) -> None:
         for alert in alerts:
             conn.execute(
                 """INSERT OR IGNORE INTO alerts
-                   (timestamp, source_host, source_ip, prediction, severity, attack_prob,
+                   (timestamp, source_host, source_ip, destination_ip, prediction, severity, attack_prob,
                     blocked, indexed_at, raw_log, attack_type, source_log_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (alert["timestamp"], alert["source_host"], alert["source_ip"],
-                 alert["prediction"], alert["severity"], alert["attack_prob"],
+                 alert.get("destination_ip"), alert["prediction"], alert["severity"], alert["attack_prob"],
                  alert["blocked"], alert["indexed_at"], alert["raw_log"],
                  alert["attack_type"], alert["source_log_id"]),
             )
@@ -245,16 +272,39 @@ def process_once(model, scaler, last_id: int) -> int:
         return last_id
     cursor = logs[-1]["id"]
     values, valid_logs = extract_features(logs, scaler)
-    alerts = []
+    events = []
     if values is not None:
         predictions, probabilities = classify(model, values)
-        label, no_block = current_attack_run()
-        alerts = build_attack_alerts(valid_logs, predictions, probabilities, label)
-        for alert in alerts:
-            # Low-risk runs are still detected and shown, but never firewalled.
-            if AUTO_BLOCK and not no_block and block_ip(alert["source_ip"]):
-                alert["blocked"] = 1
-    commit_batch(alerts, cursor)
+        active_runs = current_attack_runs()
+        events = build_events(valid_logs, predictions, probabilities, active_runs)
+    commit_batch(events, cursor)
+
+    # Escalate only after repeated high-score evidence. Whitelisted/protected
+    # sources remain visible in the stream but are never firewalled.
+    attack_ips = {
+        event["source_ip"] for event in events
+        if event["prediction"] == "ATTACK"
+        and not is_whitelisted(event["source_ip"])
+    }
+    no_block_ips = {
+        ip for ip, (_, no_block) in active_runs.items() if no_block
+    } if values is not None else set()
+    if AUTO_BLOCK:
+        for ip in sorted(attack_ips):
+            if ip in no_block_ips or "0.0.0.0" in no_block_ips:
+                continue
+            if has_block_evidence(ip) and block_ip(
+                ip,
+                f"{BLOCK_MIN_ALERTS}+ model alerts/{BLOCK_WINDOW_SECONDS}s",
+            ):
+                with connect(DB_PATH) as conn:
+                    conn.execute(
+                        """UPDATE alerts SET blocked = 1 WHERE id = (
+                               SELECT id FROM alerts WHERE source_ip = ?
+                               ORDER BY indexed_at DESC, id DESC LIMIT 1
+                           )""",
+                        (ip,),
+                    )
     # Objective 2: fuse network anomalies with the auth-log source per IP.
     try:
         with connect(DB_PATH) as conn:
@@ -263,7 +313,11 @@ def process_once(model, scaler, last_id: int) -> int:
             log.info("Correlation pass wrote %d fused alerts", correlated)
     except Exception:
         log.exception("Correlation step failed")
-    log.info("Processed %d logs; attacks=%d; cursor=%d", len(logs), len(alerts), cursor)
+    attack_count = sum(event["prediction"] == "ATTACK" for event in events)
+    log.info(
+        "Processed %d logs; benign=%d attacks=%d cursor=%d",
+        len(logs), len(events) - attack_count, attack_count, cursor,
+    )
     return cursor
 
 
@@ -274,8 +328,9 @@ def run() -> None:
     restore_persisted_blocks()
     cursor = get_cursor()
     log.info(
-        "Inference started; poll=%ss threshold=%s cursor=%s auto_block=%s",
+        "Inference started; poll=%ss threshold=%s cursor=%s auto_block=%s block_policy=%s/%ss@%s",
         POLL_INTERVAL, THRESHOLD, cursor, AUTO_BLOCK,
+        BLOCK_MIN_ALERTS, BLOCK_WINDOW_SECONDS, BLOCK_MIN_SCORE,
     )
     while True:
         try:

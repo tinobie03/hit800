@@ -53,15 +53,18 @@ def score_log_anomalies(rows: list[dict]) -> dict[str, float]:
     )
     ips = [r["source_ip"] for r in rows]
 
-    # Cold-start / small-sample fallback: robust z-score on failed logins.
+    # Cold-start / small-sample fallback. A relative z-score alone cannot flag
+    # the common lab case where one attacking IP is the entire sample, so blend
+    # it with an absolute failed-login signal that rises smoothly toward 1.
     if IsolationForest is None or len(rows) < MIN_SAMPLES_FOR_MODEL:
         counts = features[:, 0]
         median = float(np.median(counts))
         mad = float(np.median(np.abs(counts - median))) or 1.0
         scores = {}
-        for ip, count in zip(ips, counts):
+        for ip, count, distinct_users in zip(ips, counts, features[:, 1]):
             z = 0.6745 * (count - median) / mad  # robust z
-            scores[ip] = max(scores.get(ip, 0.0), _sigmoid(z - 1.5))
+            absolute = 1.0 - math.exp(-(count + distinct_users) / 5.0)
+            scores[ip] = max(scores.get(ip, 0.0), _sigmoid(z - 1.5), absolute)
         return scores
 
     # Unsupervised model: lower decision_function => more anomalous.

@@ -26,12 +26,7 @@ KNOWN ATTACKS (realistic):
   port      Port Scan
 
 UNKNOWN ATTACKS (novel patterns):
-  unknown   Run all unknown attack patterns
-  ack       ACK Flood
-  rst       RST Flood
-  fin       FIN Scan
-  psh       PSH+URG anomaly
-  slow      Slow-rate botnet
+  unknown   Run the ACK, RST, FIN, PSH+URG, and slow-rate pattern suite
 
 GROUPS:
   known     All known attacks (syn ssh udp icmp port)
@@ -123,6 +118,16 @@ fi
 echo "[✓] Target is reachable"
 echo ""
 
+# Record the actual attacker address so the API labels only this host's alerts.
+# Without it, attack-end labels every alert seen during the time window.
+SOURCE_IP="$(ip route get "$TARGET_IP" 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+if [ -z "$SOURCE_IP" ]; then
+    echo "[!] ERROR: Could not determine the source IP used to reach $TARGET_IP"
+    exit 1
+fi
+echo "[*] Attacker source IP: $SOURCE_IP"
+echo ""
+
 # Set intensity parameters
 case "$INTENSITY" in
     light)
@@ -149,9 +154,33 @@ esac
 api_call() {
     local endpoint="$1"
     local data="$2"
-    curl -s -X POST "http://${TARGET_IP}:8000${endpoint}" \
+    curl --fail-with-body -sS --connect-timeout 3 --max-time 10 \
+        -X POST "http://${TARGET_IP}:8000${endpoint}" \
         -H "Content-Type: application/json" \
-        -d "$data" 2>/dev/null || echo "{}"
+        -d "$data"
+}
+
+start_attack_run() {
+    local attack_type="$1"
+    local response attack_id
+    if ! response=$(api_call "/api/attack-start" "{\"attack_type\":\"$attack_type\",\"target_ip\":\"$TARGET_IP\",\"source_ip\":\"$SOURCE_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}"); then
+        echo "[!] API rejected attack-start for $attack_type" >&2
+        return 1
+    fi
+    attack_id=$(printf '%s' "$response" | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
+    if ! [[ "$attack_id" =~ ^[0-9]+$ ]]; then
+        echo "[!] Invalid attack-start response: $response" >&2
+        return 1
+    fi
+    printf '%s' "$attack_id"
+}
+
+end_attack_run() {
+    local attack_id="$1"
+    local packets_sent="$2"
+    if ! api_call "/api/attack-end" "{\"attack_id\":$attack_id,\"packets_sent\":$packets_sent}" >/dev/null; then
+        echo "[!] Warning: API did not record attack-end for ID $attack_id" >&2
+    fi
 }
 
 # Run selected attacks
@@ -165,8 +194,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "╚════════════════════════════════════════════════════════════╝"
 
             # Log attack start
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
-            ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
+            ATTACK_ID=$(start_attack_run "$ATTACK_TYPE") || exit 1
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
             echo "[*] Flooding port 80 with SYN packets..."
@@ -174,7 +202,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             sudo hping3 -S -i $HPING_RATE -p 80 $TARGET_IP -c $PACKET_COUNT 2>/dev/null | tail -5
 
             # Log attack end
-            api_call "/api/attack-end" "{\"attack_id\":$ATTACK_ID,\"packets_sent\":$PACKET_COUNT}" > /dev/null
+            end_attack_run "$ATTACK_ID" "$PACKET_COUNT"
             echo "[✓] SYN flood completed and labeled"
             echo ""
             ;;
@@ -186,14 +214,13 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
-            ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
+            ATTACK_ID=$(start_attack_run "$ATTACK_TYPE") || exit 1
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
             echo "[*] Starting SSH brute force..."
             bash "$SCRIPT_DIR/attack_ssh_brute.sh" $TARGET_IP 2>/dev/null | grep -E "valid|completed"
 
-            api_call "/api/attack-end" "{\"attack_id\":$ATTACK_ID,\"packets_sent\":84}" > /dev/null
+            end_attack_run "$ATTACK_ID" 84
             echo "[✓] SSH brute force completed and labeled"
             echo ""
             ;;
@@ -205,15 +232,14 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
-            ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
+            ATTACK_ID=$(start_attack_run "$ATTACK_TYPE") || exit 1
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
             echo "[*] Flooding port 53 with UDP packets..."
             PACKET_COUNT=$((UDP_DURATION * 100))
             sudo hping3 -2 -i $HPING_RATE -p 53 $TARGET_IP -c $PACKET_COUNT 2>/dev/null | tail -5
 
-            api_call "/api/attack-end" "{\"attack_id\":$ATTACK_ID,\"packets_sent\":$PACKET_COUNT}" > /dev/null
+            end_attack_run "$ATTACK_ID" "$PACKET_COUNT"
             echo "[✓] UDP flood completed and labeled"
             echo ""
             ;;
@@ -225,15 +251,14 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
-            ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
+            ATTACK_ID=$(start_attack_run "$ATTACK_TYPE") || exit 1
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
             echo "[*] Flooding with ICMP packets..."
             PACKET_COUNT=$((ICMP_DURATION * 100))
             sudo hping3 -1 -i $HPING_RATE $TARGET_IP -c $PACKET_COUNT 2>/dev/null | tail -5
 
-            api_call "/api/attack-end" "{\"attack_id\":$ATTACK_ID,\"packets_sent\":$PACKET_COUNT}" > /dev/null
+            end_attack_run "$ATTACK_ID" "$PACKET_COUNT"
             echo "[✓] ICMP flood completed and labeled"
             echo ""
             ;;
@@ -245,14 +270,13 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
-            ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
+            ATTACK_ID=$(start_attack_run "$ATTACK_TYPE") || exit 1
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
             echo "[*] Running port scan..."
             bash "$SCRIPT_DIR/attack_portscan.sh" $TARGET_IP 2>/dev/null | grep -E "scan|completed"
 
-            api_call "/api/attack-end" "{\"attack_id\":$ATTACK_ID,\"packets_sent\":1000}" > /dev/null
+            end_attack_run "$ATTACK_ID" 1000
             echo "[✓] Port scan completed and labeled"
             echo ""
             ;;
@@ -264,8 +288,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
-            ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
+            ATTACK_ID=$(start_attack_run "$ATTACK_TYPE") || exit 1
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
             echo "[*] Running unknown attack patterns..."
@@ -275,7 +298,7 @@ for ATTACK in "${ATTACKS[@]}"; do
                 echo "[!] Unknown attacks script not found"
             fi
 
-            api_call "/api/attack-end" "{\"attack_id\":$ATTACK_ID,\"packets_sent\":5000}" > /dev/null
+            end_attack_run "$ATTACK_ID" 5000
             echo "[✓] Unknown attacks completed and labeled"
             echo ""
             ;;

@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { fetchAlerts, predict, clearDatabase } from '../utils/api.js'
+import { fetchEvents, predict, clearDatabase } from '../utils/api.js'
 
 /**
  * LiveFlowPredictor
  *
  * TWO MODES:
- * 1. LIVE/AUTO: Continuously polls /api/alerts, shows real predictions from inference service
+ * 1. LIVE/AUTO: Continuously polls /api/events, showing benign and attack classifications
  * 2. MANUAL: Same as old FlowPredictor - you paste JSON and click predict
  *
  * The key insight:
@@ -121,32 +121,31 @@ export default function LiveFlowPredictor() {
   const streamIntervalRef = useRef(null)
   const lastAlertIdRef = useRef(null)
 
-  // LIVE MODE: Poll /api/alerts continuously
+  // LIVE MODE: Poll /api/events continuously
   useEffect(() => {
     if (mode !== 'live' || !isStreaming) return
 
     const pollAlerts = async () => {
       try {
         setLoading(true)
-        const data = await fetchAlerts(10, 1) // Last 10 from last 1 hour
+        const data = await fetchEvents(20, 1)
 
-        if (data.alerts && data.alerts.length > 0) {
+        if (data.events && data.events.length > 0) {
           // Show only recent alerts we haven't shown yet
-          const newAlerts = data.alerts.filter(
-            a => !lastAlertIdRef.current || a.timestamp > lastAlertIdRef.current
+          const newAlerts = data.events.filter(
+            a => lastAlertIdRef.current == null || a.id > lastAlertIdRef.current
           )
 
           if (newAlerts.length > 0) {
-            setPredictions([
+            setPredictions(previous => [
               ...newAlerts.map(a => ({
                 ...a,
-                isLive: true,
                 timestamp: new Date(a.timestamp).toLocaleTimeString()
               })),
-              ...predictions
+              ...previous
             ].slice(0, 20)) // Keep last 20
 
-            lastAlertIdRef.current = data.alerts[0].timestamp
+            lastAlertIdRef.current = Math.max(...data.events.map(a => a.id))
           }
         }
         setError(null)
@@ -350,7 +349,7 @@ export default function LiveFlowPredictor() {
                         {pred.prediction}
                       </span>
                       <span className="text-xs text-ids-muted">{pred.timestamp}</span>
-                      {pred.isLive && <span className="text-xs text-green-400">●</span>}
+                      {pred.currently_blocked && <span className="text-xs text-red-400">BLOCKED</span>}
                     </div>
                     <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
                       severityColor[pred.severity]
@@ -365,7 +364,7 @@ export default function LiveFlowPredictor() {
                       <span className="ml-2 text-ids-text font-mono">{pred.source_ip}</span>
                     </div>
                     <div>
-                      <span className="text-ids-muted">Confidence:</span>
+                      <span className="text-ids-muted">Model score:</span>
                       <span className={`ml-2 font-mono ${
                         pred.prediction === 'ATTACK' ? 'text-red-400' : 'text-green-400'
                       }`}>
@@ -380,7 +379,7 @@ export default function LiveFlowPredictor() {
 
           <div className="pt-2 border-t border-ids-border/50 text-xs text-ids-muted space-y-1">
             <p>🔴 <strong>Live Mode:</strong> Shows real detections from the inference service (every 5s)</p>
-            <p>📊 <strong>Source:</strong> Automatically fetches /api/alerts</p>
+            <p>📊 <strong>Source:</strong> Shows every model classification from /api/events</p>
             <p>⚡ <strong>No manual input needed</strong> — just watch the stream!</p>
           </div>
         </div>

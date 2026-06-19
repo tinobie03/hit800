@@ -64,6 +64,31 @@ python -m model.evaluate
 
 Current checked-in held-out results at threshold 0.50 are recorded in `logs/evaluate.json`. These results measure a random held-out split; they do not by themselves establish zero-day detection. Use grouped, temporal, and held-out-attack-family evaluations for research claims.
 
+### Live-data calibration
+
+The live packet extractor must be represented in training data. In a controlled
+lab, collect ordinary traffic from a client VM and tracked attacks from a
+different attacker VM, then export and retrain:
+
+```bash
+# Normal client VM
+./scripts/generate_benign_traffic.sh <ids-ip> 600
+
+# Attacker VM: baseline, gradual SYN evidence, then escalation
+./scripts/run_live_scenario.sh <ids-ip> syn
+
+# IDS VM
+python scripts/export_labeled_flows.py --db data/ids.db
+python -m preprocessing.preprocess
+python train.py
+python -m model.evaluate
+docker compose --profile packet-capture up -d --build --force-recreate
+```
+
+`preprocessing.preprocess` automatically combines `data/raw/Live_*.csv` with
+the base dataset. Review class counts and held-out false positives before
+deploying the resulting model.
+
 ## Verification
 
 ```bash
@@ -77,8 +102,9 @@ cd dashboard && npm run build
 
 - Whitelist changes are picked up on the next inference poll.
 - The inference cursor is persisted in SQLite, preventing replay after restart.
-- Automatic blocking is disabled by default. Enable it only after whitelisting the
-  management client and narrowing `PROTECTED_NETWORKS` for the lab.
+- The Docker lab enables automatic blocking after three attack classifications
+  from one IP within 60 seconds, with at least one score of 0.80 or above.
+  Whitelist the management client before enabling it outside the lab.
 - A block is recorded as active only after all host firewall rules succeed.
 - Packet capture aggregates bidirectional flows by protocol, source/destination IP, and ports.
 - The API currently has no authentication; restrict port 8000 at the network boundary.

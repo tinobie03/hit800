@@ -22,7 +22,7 @@ function StatCard({ label, value, sub, valueColor, icon }) {
 export default function StatsRow({ stats, health, lastAlertTime }) {
   const totalAlerts   = stats?.total_alerts  ?? stats?.total_attacks ?? 0
   const totalBlocked  = stats?.total_blocked ?? stats?.blocked_ips   ?? 0
-  const avgConf       = stats?.avg_confidence
+  const avgConf       = stats?.avg_attack_prob ?? stats?.avg_confidence
   const maxProb       = stats?.max_attack_prob ?? stats?.max_confidence
 
   const confPct = avgConf != null
@@ -48,10 +48,10 @@ export default function StatsRow({ stats, health, lastAlertTime }) {
     statusColor = 'text-ids-danger'
     statusIcon  = '⛔'
   } else if (totalAlerts > 0 && (maxProb > 0.8 || totalBlocked > 0)) {
-    statusValue = 'DANGER'
-    statusSub   = `${totalBlocked} IP${totalBlocked !== 1 ? 's' : ''} blocked · ${maxProb != null ? (maxProb * 100).toFixed(0) : '?'}% peak`
-    statusColor = 'text-ids-danger'
-    statusIcon  = '🔴'
+    statusValue = 'MITIGATING'
+    statusSub   = `${totalBlocked} active block${totalBlocked !== 1 ? 's' : ''} · ${maxProb != null ? (maxProb * 100).toFixed(0) : '—'}% peak score`
+    statusColor = 'text-ids-orange'
+    statusIcon  = '🛡️'
   } else if (totalAlerts > 0) {
     statusValue = 'WARNING'
     statusSub   = `${totalAlerts} alert${totalAlerts !== 1 ? 's' : ''} detected · monitoring`
@@ -81,7 +81,7 @@ export default function StatsRow({ stats, health, lastAlertTime }) {
         icon="🚫"
       />
       <StatCard
-        label="Avg CNN Confidence"
+        label="Avg Model Score"
         value={confPct}
         sub={maxProb != null ? `Peak: ${maxProbPct}` : 'No data'}
         valueColor="text-ids-text"

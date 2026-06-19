@@ -19,6 +19,7 @@ def init_schema(db_path: str) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
                 source_ip TEXT,
+                destination_ip TEXT,
                 source_host TEXT,
                 label TEXT,
                 data TEXT NOT NULL
@@ -28,6 +29,7 @@ def init_schema(db_path: str) -> None:
                 timestamp TEXT,
                 source_host TEXT,
                 source_ip TEXT,
+                destination_ip TEXT,
                 prediction TEXT,
                 severity TEXT,
                 attack_prob REAL,
@@ -90,10 +92,15 @@ def init_schema(db_path: str) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_log_events_indexed ON log_events(indexed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_correlated_indexed ON correlated_alerts(indexed_at)")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
+        if "destination_ip" not in columns:
+            conn.execute("ALTER TABLE alerts ADD COLUMN destination_ip TEXT")
         if "attack_type" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN attack_type TEXT DEFAULT 'UNKNOWN'")
         if "source_log_id" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN source_log_id INTEGER")
+        log_columns = {row[1] for row in conn.execute("PRAGMA table_info(logs)")}
+        if "destination_ip" not in log_columns:
+            conn.execute("ALTER TABLE logs ADD COLUMN destination_ip TEXT")
         run_columns = {row[1] for row in conn.execute("PRAGMA table_info(attack_runs)")}
         if "no_block" not in run_columns:
             conn.execute("ALTER TABLE attack_runs ADD COLUMN no_block INTEGER DEFAULT 0")
@@ -102,4 +109,3 @@ def init_schema(db_path: str) -> None:
             "ON alerts(source_log_id) WHERE source_log_id IS NOT NULL"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_indexed_at ON alerts(indexed_at)")
-
