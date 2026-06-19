@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     environment:
       - DB_PATH=/data/ids.db
-      - CAPTURE_INTERFACE=eth0
+      - CAPTURE_INTERFACE=enp0s1
     volumes:
       - ./logs:/app/logs
       - ./data:/data
