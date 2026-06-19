@@ -61,3 +61,10 @@ export async function unblockIP(ip) {
     return request(`/api/unblock/${encodeURIComponent(ip)}`, { method: 'DELETE' })
   }
 }
+
+export async function predict(features) {
+  return request('/api/predict', {
+    method: 'POST',
+    body: JSON.stringify({ features }),
+  })
+}
