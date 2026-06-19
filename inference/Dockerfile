@@ -25,6 +25,8 @@ ENV PYTHONUNBUFFERED=1 \
     FEAT_FILE=data/processed/feature_names.txt \
     POLL_INTERVAL=10 \
     BATCH_SIZE=500 \
-    THRESHOLD=0.50
+    THRESHOLD=0.50 \
+    AUTO_BLOCK=false \
+    PROTECTED_NETWORKS=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 
 CMD ["python", "-m", "inference.service"]

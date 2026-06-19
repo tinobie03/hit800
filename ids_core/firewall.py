@@ -34,11 +34,11 @@ def _ensure_rule(chain: str, selector: str, ip: str) -> bool:
 
 def block_ip(value: str) -> bool:
     ip = normalize_ip(value)
+    # An IDS blocks traffic arriving from an attacker. Adding an OUTPUT rule can
+    # sever SSH/API management replies and is unnecessary for source blocking.
     rules = [
         ("INPUT", "-s"),
-        ("OUTPUT", "-d"),
         ("FORWARD", "-s"),
-        ("FORWARD", "-d"),
     ]
     for chain, selector in rules:
         if not _ensure_rule(chain, selector, ip):
@@ -58,6 +58,7 @@ def _delete_all(chain: str, selector: str, ip: str) -> bool:
 
 def unblock_ip(value: str) -> bool:
     ip = normalize_ip(value)
+    # Also remove legacy destination rules created by releases before 2.1.
     return all([
         _delete_all("INPUT", "-s", ip),
         _delete_all("OUTPUT", "-d", ip),

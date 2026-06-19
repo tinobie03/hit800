@@ -7,6 +7,11 @@ from inference import service
 
 
 class InferenceStateTests(unittest.TestCase):
+    def test_private_management_addresses_are_protected(self):
+        self.assertTrue(service.is_protected("172.20.10.1"))
+        self.assertTrue(service.is_protected("192.168.64.5"))
+        self.assertFalse(service.is_protected("203.0.113.10"))
+
     def test_alert_and_cursor_commit_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             old_path = service.DB_PATH
@@ -30,4 +35,3 @@ class InferenceStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

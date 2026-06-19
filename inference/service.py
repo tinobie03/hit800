@@ -1,6 +1,7 @@
 """SQLite-backed CNN inference and host firewall enforcement service."""
 
 import json
+import ipaddress
 import logging
 import os
 import time
@@ -30,6 +31,15 @@ DB_PATH = os.getenv("DB_PATH", "data/ids.db")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
 THRESHOLD = float(os.getenv("THRESHOLD", "0.50"))
+AUTO_BLOCK = os.getenv("AUTO_BLOCK", "false").lower() in {"1", "true", "yes"}
+PROTECTED_NETWORKS = tuple(
+    ipaddress.ip_network(value.strip())
+    for value in os.getenv(
+        "PROTECTED_NETWORKS",
+        "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+    ).split(",")
+    if value.strip()
+)
 MODEL_PATH = os.getenv("MODEL_PATH", "model/onemoney_cnn.h5")
 SCALER_PATH = os.getenv("SCALER_PATH", "model/scaler.pkl")
 
@@ -74,13 +84,21 @@ def is_whitelisted(ip: str) -> bool:
     return bool(ip and ip in _whitelist_cache)
 
 
+def is_protected(ip: str) -> bool:
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return any(address in network for network in PROTECTED_NETWORKS)
+
+
 def block_ip(ip: str, reason: str = "CNN inference") -> bool:
     try:
         ip = normalize_ip(ip)
     except ValueError:
         log.warning("Refusing to block invalid IP: %r", ip)
         return False
-    if ip in _blocked_cache or is_whitelisted(ip) or ip == "0.0.0.0":
+    if ip in _blocked_cache or is_whitelisted(ip) or is_protected(ip):
         return False
     if not apply_firewall_block(ip):
         log.error("Firewall rejected block for %s; database was not changed", ip)
@@ -97,8 +115,14 @@ def block_ip(ip: str, reason: str = "CNN inference") -> bool:
 
 
 def restore_persisted_blocks() -> None:
+    if not AUTO_BLOCK:
+        log.info("Automatic blocking disabled; persisted blocks were not restored")
+        return
     failures = []
     for ip in sorted(_blocked_cache):
+        if is_protected(ip):
+            log.warning("Not restoring protected address %s", ip)
+            continue
         if not apply_firewall_block(ip):
             failures.append(ip)
     if failures:
@@ -202,7 +226,7 @@ def process_once(model, scaler, last_id: int) -> int:
         predictions, probabilities = classify(model, values)
         alerts = build_attack_alerts(valid_logs, predictions, probabilities)
         for alert in alerts:
-            if block_ip(alert["source_ip"]):
+            if AUTO_BLOCK and block_ip(alert["source_ip"]):
                 alert["blocked"] = 1
     commit_batch(alerts, cursor)
     log.info("Processed %d logs; attacks=%d; cursor=%d", len(logs), len(alerts), cursor)
@@ -215,7 +239,10 @@ def run() -> None:
     load_runtime_lists()
     restore_persisted_blocks()
     cursor = get_cursor()
-    log.info("Inference started; poll=%ss threshold=%s cursor=%s", POLL_INTERVAL, THRESHOLD, cursor)
+    log.info(
+        "Inference started; poll=%ss threshold=%s cursor=%s auto_block=%s",
+        POLL_INTERVAL, THRESHOLD, cursor, AUTO_BLOCK,
+    )
     while True:
         try:
             cursor = process_once(model, scaler, cursor)

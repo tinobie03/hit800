@@ -34,6 +34,13 @@ npm run dev -- --host 0.0.0.0
 
 Open `http://<ids-vm-ip>:5173`. The API listens on port 8000.
 
+If Vite runs on a different computer from the IDS VM, configure its API target:
+
+```bash
+cd dashboard
+VITE_API_URL=http://<ids-vm-ip>:8000 npm run dev -- --host 0.0.0.0
+```
+
 ## Services
 
 - `packet-capture`: host-network packet capture using `NET_RAW`/`NET_ADMIN`.
@@ -70,6 +77,8 @@ cd dashboard && npm run build
 
 - Whitelist changes are picked up on the next inference poll.
 - The inference cursor is persisted in SQLite, preventing replay after restart.
+- Automatic blocking is disabled by default. Enable it only after whitelisting the
+  management client and narrowing `PROTECTED_NETWORKS` for the lab.
 - A block is recorded as active only after all host firewall rules succeed.
 - Packet capture aggregates bidirectional flows by protocol, source/destination IP, and ports.
 - The API currently has no authentication; restrict port 8000 at the network boundary.

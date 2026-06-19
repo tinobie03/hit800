@@ -1,10 +1,22 @@
-export const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+export const BASE = import.meta.env.VITE_API_URL ??
+  `${window.location.protocol}//${window.location.hostname}:8000`
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 5000)
+  let res
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      ...options,
+    })
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error(`API timeout: ${BASE}`)
+    throw new Error(`API unreachable at ${BASE}`)
+  } finally {
+    clearTimeout(timeout)
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText)
     throw new Error(`${res.status} ${text}`)
