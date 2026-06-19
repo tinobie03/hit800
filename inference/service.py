@@ -171,30 +171,31 @@ def classify(model, values: np.ndarray):
     return (probabilities >= THRESHOLD).astype(int), probabilities
 
 
-def current_attack_label() -> str:
-    """Return the attack_type of the in-progress (or just-finished) simulation.
+def current_attack_run() -> tuple[str, bool]:
+    """Return (attack_type, no_block) for the in-progress/just-finished simulation.
 
     Labels alerts at creation time so they are tagged correctly despite the
-    capture/inference latency. Returns 'UNKNOWN' when no simulation is active.
+    capture/inference latency. Returns ('UNKNOWN', False) when none is active.
     """
     now = datetime.now(timezone.utc).isoformat()
     try:
         with connect(DB_PATH) as conn:
             row = conn.execute(
-                """SELECT attack_type FROM attack_runs
+                """SELECT attack_type, no_block FROM attack_runs
                    WHERE start_time <= ?
                      AND (end_time IS NULL OR ? <= datetime(end_time, '+30 seconds'))
                    ORDER BY id DESC LIMIT 1""",
                 (now, now),
             ).fetchone()
-        return row[0] if row and row[0] else "UNKNOWN"
+        if row:
+            return (row[0] or "UNKNOWN"), bool(row[1])
     except Exception:
-        return "UNKNOWN"
+        pass
+    return "UNKNOWN", False
 
 
-def build_attack_alerts(logs, predictions, probabilities) -> list[dict]:
+def build_attack_alerts(logs, predictions, probabilities, label="UNKNOWN") -> list[dict]:
     now = datetime.now(timezone.utc).isoformat()
-    label = current_attack_label()
     alerts = []
     for log_doc, prediction, probability in zip(logs, predictions, probabilities):
         ip = log_doc.get("source_ip") or "unknown"
@@ -246,9 +247,11 @@ def process_once(model, scaler, last_id: int) -> int:
     alerts = []
     if values is not None:
         predictions, probabilities = classify(model, values)
-        alerts = build_attack_alerts(valid_logs, predictions, probabilities)
+        label, no_block = current_attack_run()
+        alerts = build_attack_alerts(valid_logs, predictions, probabilities, label)
         for alert in alerts:
-            if AUTO_BLOCK and block_ip(alert["source_ip"]):
+            # Low-risk runs are still detected and shown, but never firewalled.
+            if AUTO_BLOCK and not no_block and block_ip(alert["source_ip"]):
                 alert["blocked"] = 1
     commit_batch(alerts, cursor)
     log.info("Processed %d logs; attacks=%d; cursor=%d", len(logs), len(alerts), cursor)

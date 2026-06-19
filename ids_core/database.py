@@ -61,7 +61,8 @@ def init_schema(db_path: str) -> None:
                 intensity TEXT,
                 start_time TEXT,
                 end_time TEXT,
-                status TEXT DEFAULT 'running'
+                status TEXT DEFAULT 'running',
+                no_block INTEGER DEFAULT 0
             );
         """)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
@@ -69,6 +70,9 @@ def init_schema(db_path: str) -> None:
             conn.execute("ALTER TABLE alerts ADD COLUMN attack_type TEXT DEFAULT 'UNKNOWN'")
         if "source_log_id" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN source_log_id INTEGER")
+        run_columns = {row[1] for row in conn.execute("PRAGMA table_info(attack_runs)")}
+        if "no_block" not in run_columns:
+            conn.execute("ALTER TABLE attack_runs ADD COLUMN no_block INTEGER DEFAULT 0")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_source_log "
             "ON alerts(source_log_id) WHERE source_log_id IS NOT NULL"

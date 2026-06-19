@@ -498,46 +498,35 @@ class AttackStartRequest(BaseModel):
     target_ip: str = Field(..., description="Target IP address")
     source_ip: Optional[str] = Field(None, description="Attacker IP (optional)")
     intensity: str = Field("normal", description="light, normal, or heavy")
+    no_block: bool = Field(False, description="Low-risk run: detect & show as attack but never firewall the source")
 
 
 @app.post("/api/attack-start")
 def log_attack_start(req: AttackStartRequest):
     """
     Log when an attack simulation starts.
-    Used to automatically label alerts with attack type.
+    Used to automatically label alerts with attack type and to control
+    whether the inference service should firewall the source during this run.
     """
     try:
         conn = get_db()
         c = conn.cursor()
         now = datetime.now(timezone.utc).isoformat()
 
-        # Create attack_runs table if it doesn't exist
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS attack_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                attack_type TEXT,
-                target_ip TEXT,
-                source_ip TEXT,
-                intensity TEXT,
-                start_time TEXT,
-                end_time TEXT,
-                status TEXT DEFAULT 'running'
-            )
-        """)
-
-        # Insert attack start record
+        # Insert attack start record (schema is created by init_schema at startup)
         c.execute(
-            "INSERT INTO attack_runs (attack_type, target_ip, source_ip, intensity, start_time, status) VALUES (?, ?, ?, ?, ?, ?)",
-            (req.attack_type, req.target_ip, req.source_ip or "0.0.0.0", req.intensity, now, "running")
+            "INSERT INTO attack_runs (attack_type, target_ip, source_ip, intensity, start_time, status, no_block) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (req.attack_type, req.target_ip, req.source_ip or "0.0.0.0", req.intensity, now, "running", 1 if req.no_block else 0)
         )
         attack_id = c.lastrowid
         conn.commit()
         conn.close()
 
-        log.info(f"Attack started: ID={attack_id} Type={req.attack_type} Target={req.target_ip} Intensity={req.intensity}")
+        log.info(f"Attack started: ID={attack_id} Type={req.attack_type} Target={req.target_ip} Intensity={req.intensity} no_block={req.no_block}")
         return {
             "status": "recorded",
             "attack_id": attack_id,
+            "no_block": req.no_block,
             "message": f"Attack {req.attack_type} started"
         }
     except Exception as exc:

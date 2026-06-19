@@ -33,10 +33,16 @@ UNKNOWN ATTACKS (novel patterns):
   psh       PSH+URG anomaly
   slow      Slow-rate botnet
 
-INTENSITY:
-  --light   Reduced packets (30 sec)
-  --normal  Standard packets (15 sec)
-  --heavy   Max packets (20 sec)
+GROUPS:
+  known     All known attacks (syn ssh udp icmp port)
+  all       Every known + unknown attack
+
+INTENSITY / RISK FLAGS:
+  --light     Reduced packets
+  --normal    Standard packets (default)
+  --heavy     Max packets (aggressive)
+  --no-block  Detected & shown as attack, but source is NEVER firewalled
+  --low-risk  Shortcut for --light + --no-block
 
 EXAMPLES:
   # Run SYN flood only
@@ -45,16 +51,17 @@ EXAMPLES:
   # Run multiple known attacks
   $0 192.168.64.2 syn ssh udp
 
-  # Run all unknown attacks
-  $0 192.168.64.2 unknown
+  # Run EVERYTHING (known + unknown)
+  $0 192.168.64.2 all
 
-  # Mix known and unknown
-  $0 192.168.64.2 syn unknown
+  # Run all known attacks only
+  $0 192.168.64.2 known
 
-  # Light intensity (don't kill the server)
-  $0 192.168.64.2 --light syn ssh
+  # Low-risk: show as attacks on the dashboard but don't block the IP
+  $0 192.168.64.2 --low-risk all
+  $0 192.168.64.2 --no-block syn udp
 
-  # Heavy intensity (aggressive)
+  # Heavy intensity (aggressive, will trigger blocking)
   $0 192.168.64.2 --heavy syn udp icmp
 EOF
 }
@@ -65,30 +72,31 @@ if [ -z "$TARGET_IP" ] || [ "$TARGET_IP" == "--help" ] || [ "$TARGET_IP" == "-h"
     exit 0
 fi
 
-# Parse intensity flag if present
-case "$2" in
-    --light)
-        INTENSITY="light"
-        shift
-        ;;
-    --normal)
-        INTENSITY="normal"
-        shift
-        ;;
-    --heavy)
-        INTENSITY="heavy"
-        shift
-        ;;
-esac
+# Parse flags and collect attack names (flags may appear anywhere after target)
+NO_BLOCK="false"
+ATTACKS=()
+for arg in "${@:2}"; do
+    case "$arg" in
+        --light)    INTENSITY="light" ;;
+        --normal)   INTENSITY="normal" ;;
+        --heavy)    INTENSITY="heavy" ;;
+        --no-block) NO_BLOCK="true" ;;
+        --low-risk) INTENSITY="light"; NO_BLOCK="true" ;;  # gentle + never firewalled
+        all)        ATTACKS+=(syn ssh udp icmp port unknown) ;;
+        known)      ATTACKS+=(syn ssh udp icmp port) ;;
+        --*)        echo "[!] Unknown flag: $arg" ;;
+        *)          ATTACKS+=("$arg") ;;
+    esac
+done
 
-# Get remaining attacks
-ATTACKS=("${@:2}")
 if [ ${#ATTACKS[@]} -eq 0 ]; then
     echo "[!] No attacks specified. Use --help for options"
     echo ""
     echo "Quick start:"
-    echo "  $0 $TARGET_IP syn       # Single attack"
-    echo "  $0 $TARGET_IP syn ssh udp  # Multiple attacks"
+    echo "  $0 $TARGET_IP syn               # Single attack"
+    echo "  $0 $TARGET_IP syn ssh udp       # Multiple attacks"
+    echo "  $0 $TARGET_IP all               # Every known + unknown attack"
+    echo "  $0 $TARGET_IP --low-risk all    # All attacks, detected but never blocked"
     exit 1
 fi
 
@@ -96,9 +104,15 @@ echo "╔═══════════════════════�
 echo "║         OneMoney IDS Attack Simulation Suite               ║"
 echo "║         Target: $TARGET_IP                         ║"
 echo "║         Intensity: $INTENSITY                       ║"
+echo "║         No-block (low-risk): $NO_BLOCK              ║"
 echo "║         Attacks: ${ATTACKS[*]}                     ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
+if [ "$NO_BLOCK" == "true" ]; then
+    echo "[*] LOW-RISK mode: attacks will be DETECTED and shown on the dashboard,"
+    echo "    but the inference service will NOT firewall the source during this run."
+    echo ""
+fi
 
 # Verify connectivity
 echo "[*] Verifying connectivity to $TARGET_IP..."
@@ -151,7 +165,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "╚════════════════════════════════════════════════════════════╝"
 
             # Log attack start
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\"}")
+            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
             ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
@@ -172,7 +186,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\"}")
+            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
             ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
@@ -191,7 +205,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\"}")
+            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
             ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
@@ -211,7 +225,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\"}")
+            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
             ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
@@ -231,7 +245,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\"}")
+            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
             ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
@@ -250,7 +264,7 @@ for ATTACK in "${ATTACKS[@]}"; do
             echo "║  Time: $(date '+%H:%M:%S')                                    ║"
             echo "╚════════════════════════════════════════════════════════════╝"
 
-            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\"}")
+            RESPONSE=$(api_call "/api/attack-start" "{\"attack_type\":\"$ATTACK_TYPE\",\"target_ip\":\"$TARGET_IP\",\"intensity\":\"$INTENSITY\",\"no_block\":$NO_BLOCK}")
             ATTACK_ID=$(echo $RESPONSE | grep -o '"attack_id":[0-9]*' | grep -o '[0-9]*')
             echo "[*] Attack recorded (ID: $ATTACK_ID)"
 
