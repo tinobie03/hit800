@@ -112,7 +112,8 @@ def init_sqlite():
         attack_prob REAL,
         blocked INTEGER,
         indexed_at TEXT,
-        raw_log TEXT
+        raw_log TEXT,
+        attack_type TEXT DEFAULT 'UNKNOWN'
     )""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS blocked_ips (
@@ -122,12 +123,39 @@ def init_sqlite():
         active INTEGER
     )""")
 
+    c.execute("""CREATE TABLE IF NOT EXISTS whitelist (
+        ip TEXT PRIMARY KEY,
+        reason TEXT,
+        added_at TEXT,
+        active INTEGER DEFAULT 1
+    )""")
+
     conn.commit()
     conn.close()
     log.info(f"SQLite initialized: {DB_PATH}")
     return DB_PATH
 
 _blocked_cache: set = set()
+_whitelist_cache: set = set()
+
+def load_whitelist():
+    """Load whitelisted IPs from database into memory cache"""
+    global _whitelist_cache
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT ip FROM whitelist WHERE active = 1")
+        _whitelist_cache = {row[0] for row in c.fetchall()}
+        conn.close()
+        if _whitelist_cache:
+            log.info(f"Loaded {len(_whitelist_cache)} whitelisted IPs")
+    except Exception as exc:
+        log.warning(f"Could not load whitelist: {exc}")
+        _whitelist_cache = set()
+
+def is_whitelisted(ip: str) -> bool:
+    """Check if IP is in whitelist"""
+    return ip in _whitelist_cache if ip else False
 
 def _run_iptables(args: list) -> bool:
     try:
@@ -148,6 +176,11 @@ def _run_iptables(args: list) -> bool:
 
 def block_ip(ip: str, reason: str = "CNN detection") -> bool:
     if ip in _blocked_cache or ip in ("unknown", "", "0.0.0.0"):
+        return False
+
+    # Don't block whitelisted IPs
+    if is_whitelisted(ip):
+        log.debug(f"Skipping block for whitelisted IP: {ip}")
         return False
 
     ok_in  = _run_iptables(["-I", "INPUT",  "-s", ip, "-j", "DROP"])
@@ -243,18 +276,29 @@ def build_alerts(logs: list, preds: np.ndarray, attack_probs: np.ndarray) -> lis
     now = datetime.now(timezone.utc).isoformat()
     alerts = []
     for log_doc, pred, prob in zip(logs, preds, attack_probs):
-        label = "ATTACK" if pred == 1 else "BENIGN"
-        sev = severity(float(prob)) if pred == 1 else "NONE"
+        source_ip = log_doc.get("source_ip", "unknown")
+
+        # Override: whitelist internal IPs as BENIGN
+        if is_whitelisted(source_ip):
+            label = "BENIGN"
+            sev = "NONE"
+            pred_prob = 0.0
+        else:
+            label = "ATTACK" if pred == 1 else "BENIGN"
+            sev = severity(float(prob)) if pred == 1 else "NONE"
+            pred_prob = round(float(prob), 4)
+
         alerts.append({
             "timestamp":   log_doc.get("timestamp", now),
             "source_host": log_doc.get("source_host", "unknown"),
-            "source_ip":   log_doc.get("source_ip", "unknown"),
+            "source_ip":   source_ip,
             "prediction":  label,
             "severity":    sev,
-            "attack_prob": round(float(prob), 4),
+            "attack_prob": pred_prob,
             "blocked":     0,
             "indexed_at":  now,
             "raw_log":     json.dumps(log_doc),
+            "attack_type": "UNKNOWN",
         })
     return alerts
 
@@ -267,11 +311,11 @@ def push_to_sqlite(alerts: list):
         for alert in alerts:
             c.execute(
                 """INSERT INTO alerts
-                   (timestamp, source_host, source_ip, prediction, severity, attack_prob, blocked, indexed_at, raw_log)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (timestamp, source_host, source_ip, prediction, severity, attack_prob, blocked, indexed_at, raw_log, attack_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (alert["timestamp"], alert["source_host"], alert["source_ip"],
                  alert["prediction"], alert["severity"], alert["attack_prob"],
-                 alert["blocked"], alert["indexed_at"], alert["raw_log"])
+                 alert["blocked"], alert["indexed_at"], alert["raw_log"], alert.get("attack_type", "UNKNOWN"))
             )
         conn.commit()
         conn.close()
@@ -281,6 +325,7 @@ def push_to_sqlite(alerts: list):
 
 def run():
     init_sqlite()
+    load_whitelist()
     model, scaler = load_assets()
     restore_persisted_blocks()
 

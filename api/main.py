@@ -100,17 +100,37 @@ def _iptables(args: list) -> bool:
 
 
 def _apply_block(ip: str):
-    success_in = _iptables(["-I", "INPUT",  "-s", ip, "-j", "DROP"])
-    success_out = _iptables(["-I", "OUTPUT", "-d", ip, "-j", "DROP"])
-    log.info(f"Block IP {ip}: INPUT={success_in}, OUTPUT={success_out}")
-    return success_in and success_out
+    """Block incoming AND outgoing traffic from/to IP"""
+    try:
+        # Block incoming traffic FROM this IP
+        _iptables(["-I", "INPUT", "-s", ip, "-j", "DROP"])
+        # Block outgoing traffic TO this IP
+        _iptables(["-I", "OUTPUT", "-d", ip, "-j", "DROP"])
+        # Also block forward (in case forwarding is enabled)
+        _iptables(["-I", "FORWARD", "-s", ip, "-j", "DROP"])
+        _iptables(["-I", "FORWARD", "-d", ip, "-j", "DROP"])
+        log.info(f"Blocked IP {ip}: INPUT, OUTPUT, and FORWARD rules added")
+        return True
+    except Exception as exc:
+        log.error(f"Failed to block IP {ip}: {exc}")
+        return False
 
 
 def _remove_block(ip: str):
-    success_in = _iptables(["-D", "INPUT",  "-s", ip, "-j", "DROP"])
-    success_out = _iptables(["-D", "OUTPUT", "-d", ip, "-j", "DROP"])
-    log.info(f"Unblock IP {ip}: INPUT={success_in}, OUTPUT={success_out}")
-    return success_in and success_out
+    """Remove all blocking rules for this IP"""
+    try:
+        # Remove incoming block
+        _iptables(["-D", "INPUT", "-s", ip, "-j", "DROP"])
+        # Remove outgoing block
+        _iptables(["-D", "OUTPUT", "-d", ip, "-j", "DROP"])
+        # Remove forward blocks
+        _iptables(["-D", "FORWARD", "-s", ip, "-j", "DROP"])
+        _iptables(["-D", "FORWARD", "-d", ip, "-j", "DROP"])
+        log.info(f"Unblocked IP {ip}: All rules removed")
+        return True
+    except Exception as exc:
+        log.error(f"Failed to unblock IP {ip}: {exc}")
+        return False
 
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
@@ -523,6 +543,18 @@ class AttackEndRequest(BaseModel):
     packets_sent: int = Field(0, description="Number of packets sent")
 
 
+class WhitelistIPRequest(BaseModel):
+    ip: str = Field(..., description="IP address to whitelist")
+    reason: str = Field("manual", description="Reason for whitelisting")
+
+
+class WhitelistIP(BaseModel):
+    ip: str
+    reason: str
+    added_at: str
+    active: bool
+
+
 @app.post("/api/attack-end")
 def log_attack_end(req: AttackEndRequest):
     """
@@ -574,3 +606,76 @@ def log_attack_end(req: AttackEndRequest):
     except Exception as exc:
         log.error(f"Attack end logging error: {exc}")
         raise HTTPException(status_code=500, detail="Failed to log attack end")
+
+
+@app.get("/api/whitelist", response_model=List[WhitelistIP])
+def get_whitelist():
+    """List all whitelisted IPs"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT ip, reason, added_at, active FROM whitelist WHERE active = 1")
+        docs = []
+        for row in c.fetchall():
+            docs.append({
+                "ip": row[0],
+                "reason": row[1],
+                "added_at": row[2],
+                "active": bool(row[3])
+            })
+        conn.close()
+        return docs
+    except Exception as exc:
+        log.error(f"Whitelist query error: {exc}")
+        return []
+
+
+@app.post("/api/whitelist", response_model=WhitelistIP)
+def add_whitelist(req: WhitelistIPRequest):
+    """Add an IP to whitelist (won't be flagged as attack)"""
+    ip = req.ip.strip()
+    if not ip:
+        raise HTTPException(status_code=422, detail="IP address is required")
+
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO whitelist (ip, reason, added_at, active) VALUES (?, ?, ?, ?)",
+            (ip, req.reason, now, 1)
+        )
+        conn.commit()
+        conn.close()
+        log.info(f"Added IP to whitelist: {ip}  reason={req.reason}")
+
+        return {
+            "ip": ip,
+            "reason": req.reason,
+            "added_at": now,
+            "active": True
+        }
+    except Exception as exc:
+        log.error(f"Whitelist add error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to add IP to whitelist")
+
+
+@app.delete("/api/whitelist/{ip}")
+def remove_whitelist(ip: str):
+    """Remove an IP from whitelist"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE whitelist SET active = 0 WHERE ip = ?", (ip,))
+        if c.rowcount == 0:
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"IP {ip} not found in whitelist")
+        conn.commit()
+        conn.close()
+        log.info(f"Removed IP from whitelist: {ip}")
+        return {"status": "removed", "ip": ip}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error(f"Whitelist remove error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to remove IP from whitelist")

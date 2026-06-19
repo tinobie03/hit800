@@ -6,6 +6,7 @@ import AlertsChart      from './components/AlertsChart.jsx'
 import TopIPsChart      from './components/TopIPsChart.jsx'
 import AlertsTable      from './components/AlertsTable.jsx'
 import BlockedIPs       from './components/BlockedIPs.jsx'
+import WhitelistPanel   from './components/WhitelistPanel.jsx'
 import TimeFilter       from './components/TimeFilter.jsx'
 import LiveFlowPredictor from './components/LiveFlowPredictor.jsx'
 
@@ -92,17 +93,18 @@ export default function App() {
               <TopIPsChart stats={stats} />
             </div>
 
-            {/* ── Row 3: Table + Blocked panel ── */}
+            {/* ── Row 3: Table + Blocked + Whitelist panels ── */}
             <div className="flex flex-wrap gap-5">
               <div className="flex-1 min-w-0">
                 <AlertsTable alerts={alerts} />
               </div>
-              <div className="w-full lg:w-80 xl:w-96 flex-shrink-0">
+              <div className="w-full lg:w-80 xl:w-96 flex-shrink-0 space-y-5">
                 <BlockedIPs
                   blocked={blocked}
                   onBlock={blockIP}
                   onUnblock={unblockIP}
                 />
+                <WhitelistPanel />
               </div>
             </div>
 
