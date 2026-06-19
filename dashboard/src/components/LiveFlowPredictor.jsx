@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { fetchAlerts, predict } from '../utils/api.js'
+import { fetchAlerts, predict, clearDatabase } from '../utils/api.js'
 
 /**
  * LiveFlowPredictor
@@ -112,6 +112,8 @@ export default function LiveFlowPredictor() {
   const [predictions, setPredictions] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [clearingDb, setClearingDb] = useState(false)
+  const [clearDbMessage, setClearDbMessage] = useState(null)
 
   // Manual mode state
   const [jsonInput, setJsonInput] = useState(JSON.stringify(SAMPLE_FLOW_BENIGN, null, 2))
@@ -189,6 +191,27 @@ export default function LiveFlowPredictor() {
       setError(err.message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  // Clear database
+  const handleClearDatabase = async () => {
+    if (!window.confirm('⚠️  Clear all alerts and logs from the database? This cannot be undone.')) {
+      return
+    }
+
+    try {
+      setClearingDb(true)
+      setClearDbMessage(null)
+      await clearDatabase()
+      setClearDbMessage({ type: 'success', text: 'Database cleared successfully! ✓' })
+      setPredictions([])
+      lastAlertIdRef.current = null
+      setTimeout(() => setClearDbMessage(null), 3000)
+    } catch (err) {
+      setClearDbMessage({ type: 'error', text: `Failed to clear database: ${err.message}` })
+    } finally {
+      setClearingDb(false)
     }
   }
 
@@ -272,9 +295,26 @@ export default function LiveFlowPredictor() {
               }}
               className="px-3 py-1 text-xs rounded bg-ids-border/50 text-ids-text hover:bg-ids-border transition-colors"
             >
-              Clear
+              Clear Display
+            </button>
+            <button
+              onClick={handleClearDatabase}
+              disabled={clearingDb}
+              className="px-3 py-1 text-xs rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50 transition-colors font-semibold"
+            >
+              {clearingDb ? '🗑️ Clearing...' : '🗑️ Clear DB'}
             </button>
           </div>
+
+          {clearDbMessage && (
+            <div className={`p-2 rounded-lg text-xs ${
+              clearDbMessage.type === 'success'
+                ? 'bg-green-500/10 border border-green-500/50 text-green-400'
+                : 'bg-red-500/10 border border-red-500/50 text-red-400'
+            }`}>
+              {clearDbMessage.text}
+            </div>
+          )}
 
           {error && (
             <div className="p-2 rounded-lg bg-orange-500/10 border border-orange-500/50 text-orange-400 text-xs">

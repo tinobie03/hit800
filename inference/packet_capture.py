@@ -245,16 +245,9 @@ def flush_flows_to_db():
                 features = flow_data["features"]
                 data_json = json.dumps(features)
 
-                # Determine if likely attack based on heuristics
-                is_attack = False
-                if features.get("SYN Flag Cnt", 0) > 50:
-                    is_attack = True
-                if features.get("Flow Pkts/s", 0) > 100:
-                    is_attack = True
-                if features.get("PSH Flag Cnt", 0) > 50:
-                    is_attack = True
-
-                label = "ATTACK" if is_attack else "NORMAL"
+                # Mark all flows as NORMAL - let CNN model decide
+                # (Heuristic detection was too aggressive, caught normal traffic)
+                label = "NORMAL"
 
                 c.execute(
                     "INSERT INTO logs (timestamp, source_ip, source_host, label, data) VALUES (?, ?, ?, ?, ?)",

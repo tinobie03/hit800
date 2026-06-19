@@ -68,3 +68,9 @@ export async function predict(features) {
     body: JSON.stringify({ features }),
   })
 }
+
+export async function clearDatabase() {
+  return request('/api/clear-db', {
+    method: 'POST',
+  })
+}

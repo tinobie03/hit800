@@ -417,3 +417,23 @@ def unblock_ip(ip: str):
     except Exception as exc:
         log.error(f"Unblock IP error: {exc}")
         raise HTTPException(status_code=500, detail="Failed to unblock IP")
+
+
+@app.post("/api/clear-db")
+def clear_database():
+    """
+    Clear all alerts and logs from the database.
+    Used for testing - allows clean slate without restarting services.
+    """
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM alerts")
+        c.execute("DELETE FROM logs")
+        conn.commit()
+        conn.close()
+        log.info("Database cleared: all alerts and logs deleted")
+        return {"status": "cleared", "message": "All alerts and logs deleted from database"}
+    except Exception as exc:
+        log.error(f"Clear database error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to clear database")
