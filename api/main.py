@@ -100,13 +100,17 @@ def _iptables(args: list) -> bool:
 
 
 def _apply_block(ip: str):
-    _iptables(["-I", "INPUT",  "-s", ip, "-j", "DROP"])
-    _iptables(["-I", "OUTPUT", "-d", ip, "-j", "DROP"])
+    success_in = _iptables(["-I", "INPUT",  "-s", ip, "-j", "DROP"])
+    success_out = _iptables(["-I", "OUTPUT", "-d", ip, "-j", "DROP"])
+    log.info(f"Block IP {ip}: INPUT={success_in}, OUTPUT={success_out}")
+    return success_in and success_out
 
 
 def _remove_block(ip: str):
-    _iptables(["-D", "INPUT",  "-s", ip, "-j", "DROP"])
-    _iptables(["-D", "OUTPUT", "-d", ip, "-j", "DROP"])
+    success_in = _iptables(["-D", "INPUT",  "-s", ip, "-j", "DROP"])
+    success_out = _iptables(["-D", "OUTPUT", "-d", ip, "-j", "DROP"])
+    log.info(f"Unblock IP {ip}: INPUT={success_in}, OUTPUT={success_out}")
+    return success_in and success_out
 
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
@@ -400,23 +404,32 @@ def unblock_ip(ip: str):
     Remove an IP block: delete iptables rules and mark inactive in SQLite.
     """
     try:
+        # Remove iptables rules first
+        iptables_success = _remove_block(ip)
+
+        # Update database
         conn = get_db()
         c = conn.cursor()
         c.execute("UPDATE blocked_ips SET active = 0 WHERE ip = ?", (ip,))
         if c.rowcount == 0:
             conn.close()
+            log.warning(f"Unblock attempted for {ip} but not found in database")
             raise HTTPException(status_code=404, detail=f"IP {ip} not found in block list.")
         conn.commit()
         conn.close()
 
-        _remove_block(ip)
-        log.info(f"Unblocked IP: {ip}")
-        return {"status": "unblocked", "ip": ip}
+        log.info(f"Unblocked IP: {ip} (iptables_success={iptables_success})")
+        return {
+            "status": "unblocked",
+            "ip": ip,
+            "iptables_success": iptables_success,
+            "message": "IP removed from block list" + ("" if iptables_success else " (iptables may have failed - try again)")
+        }
     except HTTPException:
         raise
     except Exception as exc:
         log.error(f"Unblock IP error: {exc}")
-        raise HTTPException(status_code=500, detail="Failed to unblock IP")
+        raise HTTPException(status_code=500, detail=f"Failed to unblock IP: {str(exc)}")
 
 
 @app.post("/api/clear-db")
