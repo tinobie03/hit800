@@ -18,6 +18,7 @@ Run:
 """
 
 import os
+import json
 import logging
 import numpy as np
 import joblib
@@ -242,7 +243,7 @@ def get_alerts(
         total = c.fetchone()[0]
 
         c.execute(
-            f"SELECT * FROM alerts WHERE {where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM alerts WHERE {where_sql} ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?",
             params + [limit, skip]
         )
         rows = c.fetchall()
@@ -346,6 +347,53 @@ def get_stats(hours: int = Query(24, ge=1, le=720)):
             "alerts_per_hour": [],
             "threshold":       THRESHOLD,
         }
+
+
+@app.get("/api/correlated")
+def get_correlated(
+    limit: int = Query(50, ge=1, le=500),
+    hours: int = Query(24, ge=1, le=720),
+    only_correlated: bool = Query(False, description="Return only multi-source confirmed alerts"),
+):
+    """Multi-source correlated alerts (network CNN fused with auth-log anomalies)."""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        extra = " AND ca.correlated = 1" if only_correlated else ""
+        # Latest fused row per IP (join against per-IP MAX(indexed_at)).
+        c.execute(
+            f"""SELECT ca.source_ip, ca.network_score, ca.log_score, ca.fused_score,
+                       ca.correlated, ca.detail, ca.window_start, ca.indexed_at
+                FROM correlated_alerts ca
+                JOIN (
+                    SELECT source_ip, MAX(indexed_at) AS m
+                    FROM correlated_alerts
+                    WHERE indexed_at >= ?
+                    GROUP BY source_ip
+                ) latest
+                  ON latest.source_ip = ca.source_ip AND latest.m = ca.indexed_at
+                WHERE ca.indexed_at >= ?{extra}
+                ORDER BY ca.fused_score DESC, ca.indexed_at DESC
+                LIMIT ?""",
+            [since, since, limit],
+        )
+        rows = c.fetchall()
+        items = [{
+            "source_ip":     r[0],
+            "network_score": r[1],
+            "log_score":     r[2],
+            "fused_score":   r[3],
+            "correlated":    bool(r[4]),
+            "detail":        json.loads(r[5]) if r[5] else {},
+            "window_start":  r[6],
+            "indexed_at":    r[7],
+        } for r in rows]
+        conn.close()
+        return {"total": len(items), "alerts": items}
+    except Exception as exc:
+        log.error(f"Correlated query error: {exc}")
+        return {"total": 0, "alerts": []}
 
 
 @app.get("/api/blocked", response_model=List[BlockedIP])
@@ -477,6 +525,8 @@ def clear_database():
         c.execute("DELETE FROM alerts")
         c.execute("DELETE FROM logs")
         c.execute("DELETE FROM blocked_ips")
+        c.execute("DELETE FROM log_events")
+        c.execute("DELETE FROM correlated_alerts")
         c.execute("DELETE FROM service_state WHERE key = 'inference_last_log_id'")
         conn.commit()
         conn.close()

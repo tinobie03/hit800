@@ -7,6 +7,7 @@ import TopIPsChart      from './components/TopIPsChart.jsx'
 import AlertsTable      from './components/AlertsTable.jsx'
 import BlockedIPs       from './components/BlockedIPs.jsx'
 import WhitelistPanel   from './components/WhitelistPanel.jsx'
+import CorrelatedAlerts from './components/CorrelatedAlerts.jsx'
 import TimeFilter       from './components/TimeFilter.jsx'
 import LiveFlowPredictor from './components/LiveFlowPredictor.jsx'
 
@@ -108,7 +109,10 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── Row 4: Live Flow Predictor (Real-time + Manual modes) ── */}
+            {/* ── Row 4: Multi-source correlation (Objective 2) ── */}
+            <CorrelatedAlerts />
+
+            {/* ── Row 5: Live Flow Predictor (Real-time + Manual modes) ── */}
             <div className="max-w-3xl">
               <LiveFlowPredictor />
             </div>

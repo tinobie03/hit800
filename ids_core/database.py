@@ -64,7 +64,31 @@ def init_schema(db_path: str) -> None:
                 status TEXT DEFAULT 'running',
                 no_block INTEGER DEFAULT 0
             );
+            -- Second data source: host auth-log events (e.g. failed SSH logins)
+            CREATE TABLE IF NOT EXISTS log_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                window_start TEXT NOT NULL,
+                source_ip TEXT NOT NULL,
+                failed_logins INTEGER DEFAULT 0,
+                distinct_users INTEGER DEFAULT 0,
+                indexed_at TEXT
+            );
+            -- Fused multi-source correlation results
+            CREATE TABLE IF NOT EXISTS correlated_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_ip TEXT NOT NULL,
+                network_score REAL DEFAULT 0,
+                log_score REAL DEFAULT 0,
+                fused_score REAL DEFAULT 0,
+                correlated INTEGER DEFAULT 0,
+                detail TEXT,
+                window_start TEXT,
+                indexed_at TEXT
+            );
         """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_log_events_ip ON log_events(source_ip)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_log_events_indexed ON log_events(indexed_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_correlated_indexed ON correlated_alerts(indexed_at)")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
         if "attack_type" not in columns:
             conn.execute("ALTER TABLE alerts ADD COLUMN attack_type TEXT DEFAULT 'UNKNOWN'")

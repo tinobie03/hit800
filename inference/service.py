@@ -13,6 +13,7 @@ import tensorflow as tf
 from ids_core.database import connect, init_schema
 from ids_core.features import FEATURES
 from ids_core.firewall import block_ip as apply_firewall_block, normalize_ip
+from ids_core.correlation import correlate
 
 try:
     from dotenv import load_dotenv
@@ -254,6 +255,14 @@ def process_once(model, scaler, last_id: int) -> int:
             if AUTO_BLOCK and not no_block and block_ip(alert["source_ip"]):
                 alert["blocked"] = 1
     commit_batch(alerts, cursor)
+    # Objective 2: fuse network anomalies with the auth-log source per IP.
+    try:
+        with connect(DB_PATH) as conn:
+            correlated = correlate(conn)
+        if correlated:
+            log.info("Correlation pass wrote %d fused alerts", correlated)
+    except Exception:
+        log.exception("Correlation step failed")
     log.info("Processed %d logs; attacks=%d; cursor=%d", len(logs), len(alerts), cursor)
     return cursor
 

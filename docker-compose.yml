@@ -19,6 +19,23 @@ services:
     profiles:
       - packet-capture
 
+  # Auth-log collector - second data source for multi-source correlation
+  auth-log:
+    build:
+      context: .
+      dockerfile: inference/Dockerfile
+    container_name: ids-auth-log
+    restart: unless-stopped
+    environment:
+      - DB_PATH=/data/ids.db
+      - AUTH_LOG_PATH=/var/log/auth.log
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/data
+      # Host auth log mounted read-only (Debian/Ubuntu: /var/log/auth.log)
+      - /var/log/auth.log:/var/log/auth.log:ro
+    command: ["python", "-m", "inference.auth_log_collector"]
+
   # Inference service - reads logs and classifies with CNN
   inference:
     build:

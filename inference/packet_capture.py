@@ -78,8 +78,15 @@ def packet_tuple(packet):
 
 
 def canonical_key(protocol: int, source: tuple, destination: tuple) -> tuple:
-    low, high = sorted((source, destination))
-    return protocol, low, high
+    # Key on host-pair + service port, ignoring the ephemeral (client) port.
+    # This collapses a flood that sprays many source ports (e.g. hping3) into a
+    # single realistic flow per (host-pair, service), instead of thousands of
+    # degenerate 1-packet flows whose per-second rates saturate the model.
+    src_ip, src_port = source
+    dst_ip, dst_port = destination
+    service_port = min(src_port, dst_port)
+    low_ip, high_ip = sorted((src_ip, dst_ip))
+    return protocol, low_ip, high_ip, service_port
 
 
 @dataclass
@@ -97,7 +104,7 @@ class Direction:
 @dataclass
 class Flow:
     protocol: int
-    forward_endpoint: tuple
+    forward_endpoint: str  # IP of the side that opened the flow
     source_ip: str
     started: float
     last_seen: float
@@ -111,7 +118,9 @@ class Flow:
     })
 
     def add(self, packet, source: tuple, timestamp: float) -> None:
-        direction = self.forward if source == self.forward_endpoint else self.backward
+        # Direction is keyed on IP (not the full endpoint) because a flow now
+        # aggregates across many ephemeral source ports.
+        direction = self.forward if source[0] == self.forward_endpoint else self.backward
         length = len(packet[IP])
         header_length = int(getattr(packet[IP], "ihl", 5) or 5) * 4
         payload_length = max(0, length - header_length)
@@ -145,7 +154,10 @@ class Flow:
     def features(self) -> dict[str, float]:
         fwd, bwd = self.forward, self.backward
         duration_us = max(0.0, (self.last_seen - self.started) * 1_000_000)
-        duration_s = max(duration_us / 1_000_000, 1e-6)
+        # Floor at 1 ms (not 1 µs) for rate maths: a sub-millisecond / single-packet
+        # flow otherwise yields ~1e6 pkts/s, far outside the model's training range,
+        # which pins the sigmoid to 1.0 for every flow.
+        duration_s = max(duration_us / 1_000_000, 1e-3)
         fmean, fstd, fmax, fmin = _stats(fwd.lengths)
         bmean, bstd, bmax, bmin = _stats(bwd.lengths)
         pmean, pstd, pmax, pmin = _stats(self.all_lengths)
@@ -214,7 +226,7 @@ def consume_packet(packet, timestamp: float | None = None) -> None:
     with flow_lock:
         flow = flows.get(key)
         if flow is None:
-            flow = Flow(protocol, source, source[0], timestamp, timestamp)
+            flow = Flow(protocol, source[0], source[0], timestamp, timestamp)
             flows[key] = flow
         flow.add(packet, source, timestamp)
 
@@ -229,12 +241,20 @@ def flush_flows_to_db() -> int:
         flows.clear()
     if not pending:
         return 0
-    now = datetime.now(timezone.utc).isoformat()
     import json
+
+    def flow_timestamp(flow) -> str:
+        # Use the real first-packet time of the flow, not the flush wall-clock,
+        # so each flow keeps its true timing instead of a shared 5s bucket.
+        try:
+            return datetime.fromtimestamp(float(flow.started), timezone.utc).isoformat()
+        except (ValueError, OSError, OverflowError, TypeError):
+            return datetime.now(timezone.utc).isoformat()
+
     with connect(DB_PATH) as conn:
         conn.executemany(
             "INSERT INTO logs (timestamp, source_ip, source_host, label, data) VALUES (?, ?, ?, ?, ?)",
-            [(now, flow.source_ip, flow.source_ip, "UNLABELLED", json.dumps(flow.features()))
+            [(flow_timestamp(flow), flow.source_ip, flow.source_ip, "UNLABELLED", json.dumps(flow.features()))
              for flow in pending],
         )
     return len(pending)

@@ -87,6 +87,12 @@ export async function clearDatabase() {
   })
 }
 
+export async function fetchCorrelated(limit = 50, hours = 24, onlyCorrelated = false) {
+  const data = await request(`/api/correlated?limit=${limit}&hours=${hours}&only_correlated=${onlyCorrelated}`)
+  if (Array.isArray(data)) return { total: data.length, alerts: data }
+  return data
+}
+
 export async function fetchWhitelist() {
   return request('/api/whitelist')
 }
